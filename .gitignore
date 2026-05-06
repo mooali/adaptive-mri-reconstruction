@@ -1,0 +1,79 @@
+# =========================
+# OS / System files
+# =========================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# Virtual environments
+venv/
+.env/
+.venv/
+
+# =========================
+# Jupyter
+# =========================
+.ipynb_checkpoints/
+
+# =========================
+# Data (VERY IMPORTANT)
+# =========================
+data/
+*.nii
+*.nii.gz
+*.npy
+*.npz
+
+# =========================
+# Models / Checkpoints
+# =========================
+models/
+*.pth
+*.pt
+*.ckpt
+
+# =========================
+# Outputs / Results
+# =========================
+outputs/
+logs/
+*.log
+*.out
+*.err
+
+# =========================
+# Figures / Plots (optional)
+# =========================
+*.png
+*.jpg
+*.jpeg
+
+# (Optional: comment above if you WANT to keep figures in repo)
+
+# =========================
+# VS Code / IDE
+# =========================
+.vscode/
+.idea/
+
+# =========================
+# Temporary / cache
+# =========================
+*.tmp
+*.cache
+
+# =========================
+# Misc
+# =========================
+*.zip
+*.tar
+*.gz
