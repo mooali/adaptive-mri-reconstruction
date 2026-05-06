@@ -75,7 +75,10 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import torch
+<<<<<<< HEAD
 import torch.nn as nn
+=======
+>>>>>>> origin/mario
 import torch.nn.functional as F
 from skimage.metrics import peak_signal_noise_ratio as psnr
 from skimage.metrics import structural_similarity as ssim
@@ -88,15 +91,19 @@ from src.config import (
     MC_DROPOUT_PASSES,
     MC_DROPOUT_P,
     UNCERTAINTY_THRESHOLD,
+<<<<<<< HEAD
     ANOMALY_DETECTOR_PATH,
     ANOMALY_THRESHOLD_PATH,
     ANOMALY_EPOCHS,
     ANOMALY_DEFAULT_THRESHOLD,
+=======
+>>>>>>> origin/mario
 )
 from src.train import UNet
 
 
 # ---------------------------------------------------------------------------
+<<<<<<< HEAD
 # Phase 2 — Anomaly detection model
 # ---------------------------------------------------------------------------
 
@@ -154,6 +161,8 @@ class SliceAutoencoder(nn.Module):
 
 
 # ---------------------------------------------------------------------------
+=======
+>>>>>>> origin/mario
 # MC Dropout hook
 # ---------------------------------------------------------------------------
 
@@ -239,6 +248,7 @@ def mc_forward_passes(model, x, device, n_passes=MC_DROPOUT_PASSES, dropout_p=MC
 
 
 # ---------------------------------------------------------------------------
+<<<<<<< HEAD
 # Phase 2 — Anomaly detection helpers
 # ---------------------------------------------------------------------------
 
@@ -377,6 +387,8 @@ def classify_anomaly(anomaly_scores, threshold):
 
 
 # ---------------------------------------------------------------------------
+=======
+>>>>>>> origin/mario
 # Uncertainty estimation
 # ---------------------------------------------------------------------------
 
@@ -443,6 +455,7 @@ def make_decision(uncertainty_score, threshold=UNCERTAINTY_THRESHOLD):
     return "SAFE" if uncertainty_score < threshold else "UNSAFE"
 
 
+<<<<<<< HEAD
 def make_combined_decision(uncertainty_score, anomaly_class,
                             threshold=UNCERTAINTY_THRESHOLD):
     """
@@ -473,6 +486,8 @@ def make_combined_decision(uncertainty_score, anomaly_class,
     return "SAFE"
 
 
+=======
+>>>>>>> origin/mario
 def format_decision(decision, uncertainty_score):
     """
     Build the human-readable decision string printed to stdout and figure titles.
@@ -502,13 +517,18 @@ def format_decision(decision, uncertainty_score):
 # ---------------------------------------------------------------------------
 
 def save_uncertainty_plots(mean_pred, uncertainty_map, gt, x_np,
+<<<<<<< HEAD
                             sample_idx, uncertainty_score, decision,
                             anomaly_scores, anomaly_recons, anomaly_class,
                             anomaly_threshold, save_dir):
+=======
+                            sample_idx, uncertainty_score, decision, save_dir):
+>>>>>>> origin/mario
     """
     Write three PNG files per sample to save_dir.
 
     File 1 — adaptive_panel_{idx}.png
+<<<<<<< HEAD
       A 3×3 grid covering all three pipeline phases:
         Row 0 : left input      | right input    | ground truth
         Row 1 : mean recon      | uncertainty map | uncertainty overlay
@@ -517,12 +537,24 @@ def save_uncertainty_plots(mean_pred, uncertainty_map, gt, x_np,
 
     File 2 — uncertainty_map_{idx}.png
       Standalone hot-colourmap uncertainty map.
+=======
+      A 2×3 grid showing the full context:
+        Row 0: left input | right input | ground truth
+        Row 1: mean reconstruction | uncertainty map | uncertainty overlay
+      The figure title colour is green for SAFE and red for UNSAFE, giving
+      an immediate visual signal when browsing outputs.
+
+    File 2 — uncertainty_map_{idx}.png
+      Standalone hot-colourmap uncertainty map suitable for inclusion in
+      reports or presentations without the surrounding context panels.
+>>>>>>> origin/mario
 
     File 3 — reconstructed_image_{idx}.png
       Standalone greyscale mean reconstruction.
 
     Parameters
     ----------
+<<<<<<< HEAD
     mean_pred         : np.ndarray  (H, W)   — ensemble mean
     uncertainty_map   : np.ndarray  (H, W)   — pixel-wise variance
     gt                : np.ndarray  (H, W)   — ground truth slice
@@ -559,10 +591,60 @@ def save_uncertainty_plots(mean_pred, uncertainty_map, gt, x_np,
         (axes[0, 2], gt,      "Ground Truth"),
     ]:
         im = ax.imshow(img, cmap="gray", vmin=0, vmax=1)
+=======
+    mean_pred         : np.ndarray  (H, W)  — ensemble mean
+    uncertainty_map   : np.ndarray  (H, W)  — pixel-wise variance
+    gt                : np.ndarray  (H, W)  — ground truth slice
+    x_np              : np.ndarray  (2, H, W) — left and right input slices
+    sample_idx        : int
+    uncertainty_score : float
+    decision          : str   — "SAFE" or "UNSAFE"
+    save_dir          : Path
+    """
+    is_safe     = decision == "SAFE"
+    label_color = "green" if is_safe else "red"
+    label_text  = "SAFE — reconstruction applied" if is_safe else "UNSAFE — full acquisition recommended"
+
+    # ── 6-panel summary ────────────────────────────────────────────────────
+    fig, axes = plt.subplots(2, 3, figsize=(18, 11))
+    fig.suptitle(
+        f"Adaptive Acquisition — Sample {sample_idx}\n"
+        f"MC passes: {MC_DROPOUT_PASSES}  |  "
+        f"Uncertainty: {uncertainty_score:.6f}  |  "
+        f"Threshold: {UNCERTAINTY_THRESHOLD}  |  "
+        f"Decision: {label_text}",
+        fontsize=12, fontweight="bold", color=label_color,
+    )
+
+    # Each tuple: (axis, image, cmap, title, vmin, vmax)
+    # vmin/vmax=None triggers matplotlib auto-scaling (used for variance maps
+    # whose range varies between samples).
+    panels = [
+        (axes[0, 0], x_np[0],         "gray", "Input: Left Slice",                          0,    1),
+        (axes[0, 1], x_np[1],         "gray", "Input: Right Slice",                         0,    1),
+        (axes[0, 2], gt,              "gray", "Ground Truth",                                0,    1),
+        (axes[1, 0], mean_pred,       "gray", f"Mean Reconstruction (N={MC_DROPOUT_PASSES})", 0,  1),
+        (axes[1, 1], uncertainty_map, "hot",  "Uncertainty Map (pixel variance)",            None, None),
+        (axes[1, 2], uncertainty_map, "hot",  "Uncertainty Overlay on Reconstruction",       None, None),
+    ]
+
+    for ax, img, cmap, title, vmin, vmax in panels:
+        if title.startswith("Uncertainty Overlay"):
+            # Show the uncertainty as a semi-transparent heat map on top of
+            # the mean reconstruction so spatial structure and uncertainty
+            # are visible in the same image.
+            ax.imshow(mean_pred, cmap="gray", vmin=0, vmax=1)
+            im = ax.imshow(img, cmap="hot", alpha=0.5, vmin=0, vmax=uncertainty_map.max())
+        elif vmin is not None:
+            im = ax.imshow(img, cmap=cmap, vmin=vmin, vmax=vmax)
+        else:
+            im = ax.imshow(img, cmap=cmap)   # auto-scale for variance maps
+>>>>>>> origin/mario
         plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
         ax.set_title(title, fontsize=10, fontweight="bold")
         ax.axis("off")
 
+<<<<<<< HEAD
     # ── Row 1: Phase 3 — uncertainty ────────────────────────────────────────
     im = axes[1, 0].imshow(mean_pred, cmap="gray", vmin=0, vmax=1)
     plt.colorbar(im, ax=axes[1, 0], fraction=0.046, pad=0.04)
@@ -627,6 +709,8 @@ def save_uncertainty_plots(mean_pred, uncertainty_map, gt, x_np,
     )
     axes[2, 2].set_title("Phase 2 + Phase 3 Summary", fontsize=10, fontweight="bold")
 
+=======
+>>>>>>> origin/mario
     plt.tight_layout()
     panel_path = save_dir / f"adaptive_panel_{sample_idx}.png"
     plt.savefig(panel_path, dpi=150, bbox_inches="tight")
@@ -664,6 +748,7 @@ def save_uncertainty_plots(mean_pred, uncertainty_map, gt, x_np,
 # Per-sample orchestration
 # ---------------------------------------------------------------------------
 
+<<<<<<< HEAD
 def analyze_sample(model, autoencoder, anomaly_threshold,
                    inputs, targets, sample_idx, device,
                    save_dir, threshold=UNCERTAINTY_THRESHOLD):
@@ -700,11 +785,37 @@ def analyze_sample(model, autoencoder, anomaly_threshold,
     uncert_score  : float — global uncertainty score (Phase 3)
     anomaly_class : str   — "NORMAL" or "SUSPICIOUS" (Phase 2)
     anomaly_score : float — mean per-slice MAE from the autoencoder
+=======
+def analyze_sample(model, inputs, targets, sample_idx, device,
+                   save_dir, threshold=UNCERTAINTY_THRESHOLD):
+    """
+    Run the full adaptive pipeline for one sample.
+
+    Connects all the pieces: load → MC passes → uncertainty → decision →
+    print → visualise.  This function is the main building block; main()
+    calls it in a loop over sample_idxs.
+
+    Parameters
+    ----------
+    model      : UNet
+    inputs     : np.memmap  shape (N, 2, H, W)
+    targets    : np.memmap  shape (N, H, W)
+    sample_idx : int
+    device     : torch.device
+    save_dir   : Path  — directory for output PNG files
+    threshold  : float — passed to make_decision; defaults to config value
+
+    Returns
+    -------
+    decision : str    — "SAFE" or "UNSAFE"
+    score    : float  — global uncertainty score for this sample
+>>>>>>> origin/mario
     """
     x_np = np.array(inputs[sample_idx])   # materialise out of memory map
     y_np = np.array(targets[sample_idx])
     x    = torch.tensor(x_np, dtype=torch.float32).unsqueeze(0)  # (1, 2, H, W)
 
+<<<<<<< HEAD
     # ── Phase 2: anomaly detection on acquired slices ──────────────────────
     anomaly_scores, anomaly_recons = compute_anomaly_score(autoencoder, x_np, device)
     anomaly_class                  = classify_anomaly(anomaly_scores, anomaly_threshold)
@@ -718,6 +829,14 @@ def analyze_sample(model, autoencoder, anomaly_threshold,
     decision = make_combined_decision(score, anomaly_class, threshold)
 
     # Log quality metrics alongside both phase scores.
+=======
+    predictions                       = mc_forward_passes(model, x, device)
+    mean_pred, uncertainty_map, score = compute_uncertainty(predictions)
+    decision                          = make_decision(score, threshold)
+
+    # Log quality metrics alongside the uncertainty so the relationship
+    # between PSNR and uncertainty is visible in the console output.
+>>>>>>> origin/mario
     sample_psnr = psnr(y_np, mean_pred, data_range=1.0)
     sample_ssim = ssim(y_np, mean_pred, data_range=1.0)
 
@@ -725,18 +844,29 @@ def analyze_sample(model, autoencoder, anomaly_threshold,
     print(
         f"  [{status}] sample={sample_idx:>5}  "
         f"PSNR={sample_psnr:.2f}dB  SSIM={sample_ssim:.4f}  "
+<<<<<<< HEAD
         f"uncertainty={score:.6f}  anomaly={anomaly_class} "
         f"(L={anomaly_scores[0]:.4f}, R={anomaly_scores[1]:.4f})"
+=======
+        f"uncertainty={score:.6f}"
+>>>>>>> origin/mario
     )
 
     save_uncertainty_plots(
         mean_pred, uncertainty_map, y_np, x_np,
+<<<<<<< HEAD
         sample_idx, score, decision,
         anomaly_scores, anomaly_recons, anomaly_class,
         anomaly_threshold, save_dir,
     )
 
     return decision, score, anomaly_class, mean_anomaly_score
+=======
+        sample_idx, score, decision, save_dir,
+    )
+
+    return decision, score
+>>>>>>> origin/mario
 
 
 # ---------------------------------------------------------------------------
@@ -764,6 +894,7 @@ def main():
     inputs  = np.load(PROCESSED_DIR / "dataset_inputs.npy",  mmap_mode="r")
     targets = np.load(PROCESSED_DIR / "dataset_targets.npy", mmap_mode="r")
 
+<<<<<<< HEAD
     # ── Phase 2: load or train the anomaly detector ────────────────────────
     autoencoder = SliceAutoencoder().to(device)
     if ANOMALY_DETECTOR_PATH.exists() and ANOMALY_THRESHOLD_PATH.exists():
@@ -779,18 +910,25 @@ def main():
         autoencoder, anomaly_threshold = train_anomaly_detector(inputs, device)
         autoencoder.eval()
 
+=======
+>>>>>>> origin/mario
     sample_idxs = np.linspace(0, len(inputs) - 1, N_EXPL_SAMPLES, dtype=int)
 
     print(
         f"\nSettings: MC passes={MC_DROPOUT_PASSES}  "
         f"dropout_p={MC_DROPOUT_P}  "
+<<<<<<< HEAD
         f"uncertainty_threshold={UNCERTAINTY_THRESHOLD}  "
         f"anomaly_threshold={anomaly_threshold:.6f}"
+=======
+        f"threshold={UNCERTAINTY_THRESHOLD}"
+>>>>>>> origin/mario
     )
     print(f"Analysing {N_EXPL_SAMPLES} samples...\n")
 
     results = []
     for idx in sample_idxs:
+<<<<<<< HEAD
         decision, score, anomaly_class, anomaly_score = analyze_sample(
             model, autoencoder, anomaly_threshold,
             inputs, targets, int(idx), device, EXPLAINABILITY_DIR,
@@ -828,6 +966,29 @@ def main():
     print(f"  UNSAFE (full acquisition)     : {n_unsafe}  "
           f"({100 * n_unsafe / len(results):.0f}%)")
     print("=" * 65)
+=======
+        decision, score = analyze_sample(
+            model, inputs, targets, int(idx), device, EXPLAINABILITY_DIR,
+        )
+        results.append((int(idx), decision, score))
+        print()   # blank line between samples for readability
+
+    # ── summary table ─────────────────────────────────────────────────────
+    n_safe   = sum(1 for _, d, _ in results if d == "SAFE")
+    n_unsafe = len(results) - n_safe
+    scores   = [s for _, _, s in results]
+
+    print("=" * 55)
+    print("ADAPTIVE ACQUISITION SUMMARY")
+    print("=" * 55)
+    print(f"  Samples analysed            : {len(results)}")
+    print(f"  SAFE   (reconstruct)        : {n_safe}  ({100*n_safe/len(results):.0f}%)")
+    print(f"  UNSAFE (full acquisition)   : {n_unsafe}  ({100*n_unsafe/len(results):.0f}%)")
+    print(f"  Mean uncertainty score      : {np.mean(scores):.6f}")
+    print(f"  Min / Max uncertainty       : {np.min(scores):.6f} / {np.max(scores):.6f}")
+    print(f"  Threshold                   : {UNCERTAINTY_THRESHOLD}")
+    print("=" * 55)
+>>>>>>> origin/mario
     print(f"\nOutputs → {EXPLAINABILITY_DIR}")
 
 
