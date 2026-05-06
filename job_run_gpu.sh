@@ -1,6 +1,6 @@
 #!/bin/bash
 
-#SBATCH --mail-user=mohammed.ali@students.unibe.ch
+#SBATCH --mail-user=mario.gonzalezdelcamino@students.unibe.ch
 #SBATCH --mail-type=BEGIN,FAIL,END
 #SBATCH --job-name=dl_project
 #SBATCH --output=./logs/%x_%j.out

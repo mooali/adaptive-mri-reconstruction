@@ -1,0 +1,22 @@
+========== EXPLAINABILITY SUMMARY STATS ==========
+
+Integrated Gradients
+  Mean IG left        : 9.35e-07 ± 5.50e-07
+  Mean IG right       : 9.13e-07 ± 5.42e-07
+  IG ratio L/R        : 1.0242
+
+Grad-CAM
+  Mean activation     : 0.01131 ± 0.00616
+
+MC Dropout Uncertainty
+  Mean uncertainty    : 4.089e-06 ± 3.657e-06
+
+Slice Contribution Analysis
+  Mean contrib left   : 0.078943 ± 0.046090
+  Mean contrib right  : 0.081083 ± 0.047897
+  Contrib ratio L/R   : 0.9736 ± 0.1165
+
+Occlusion Sensitivity (patch 8x8)
+  Mean occ left       : 0.000097 ± 0.000058
+  Mean occ right      : 0.000094 ± 0.000056
+  Occ ratio L/R       : 1.0455 ± 0.1546
