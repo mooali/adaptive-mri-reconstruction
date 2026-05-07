@@ -144,7 +144,6 @@ MC_DROPOUT_P = 0.1
 # This value is heuristic — it should be calibrated on a validation set
 # with known-difficult cases if used in a real clinical pipeline.
 UNCERTAINTY_THRESHOLD = 0.01
-<<<<<<< HEAD
 
 # ---------------------------------------------------------------------------
 # Anomaly detection / Phase 2  (src/adaptive_decision.py)
@@ -165,5 +164,19 @@ ANOMALY_EPOCHS = 10
 # Fallback anomaly threshold used when ANOMALY_THRESHOLD_PATH does not yet
 # exist (i.e. before train_anomaly_detector() has been run).
 ANOMALY_DEFAULT_THRESHOLD = 0.05
-=======
->>>>>>> origin/mario
+
+# ---------------------------------------------------------------------------
+# BraTS2020  (src/preprocess_brats.py, src/evaluate_brats.py)
+# ---------------------------------------------------------------------------
+
+# Raw BraTS2020 per-slice H5 files.
+BRATS_DIR = ROOT_DIR / "data" / "brats"
+
+# Preprocessed numpy outputs from preprocess_brats.py.
+# Suffix _ch{N} lets different modality channels coexist on disk.
+BRATS_HEALTHY_PATH = PROCESSED_DIR / "brats_healthy.npy"   # non-tumour slices (S, 256, 256)
+BRATS_TUMOR_PATH   = PROCESSED_DIR / "brats_tumor.npy"     # tumour slices     (S, 256, 256)
+
+# BraTS-domain anomaly detector (trained on BRATS_HEALTHY_PATH slices).
+BRATS_DETECTOR_PATH  = MODELS_DIR / "anomaly_detector_brats.pth"
+BRATS_THRESHOLD_PATH = MODELS_DIR / "anomaly_threshold_brats.npy"

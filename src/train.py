@@ -41,6 +41,7 @@ Dependencies
   src.config        : all hyperparameters and directory paths
 """
 
+import platform
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")   # must be set before any pyplot import; enables headless rendering
@@ -585,9 +586,10 @@ def main():
     # num_workers=4 lets the data loader prefetch batches in background
     # processes while the GPU is busy with the previous batch.
     # pin_memory=True speeds up host→GPU transfers when CUDA is available.
-    train_loader = DataLoader(train_set, batch_size=BATCH_SIZE, shuffle=True,  num_workers=4, pin_memory=True)
-    val_loader   = DataLoader(val_set,   batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True)
-    test_loader  = DataLoader(test_set,  batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True)
+    _num_workers = 0 if platform.system() == "Windows" else 4
+    train_loader = DataLoader(train_set, batch_size=BATCH_SIZE, shuffle=True,  num_workers=_num_workers, pin_memory=True)
+    val_loader   = DataLoader(val_set,   batch_size=BATCH_SIZE, shuffle=False, num_workers=_num_workers, pin_memory=True)
+    test_loader  = DataLoader(test_set,  batch_size=BATCH_SIZE, shuffle=False, num_workers=_num_workers, pin_memory=True)
 
     print(f"Train: {len(train_set):,}  Val: {len(val_set):,}  Test: {len(test_set):,}")
 

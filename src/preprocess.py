@@ -426,11 +426,11 @@ def main():
     """
     Run the full preprocessing pipeline.
 
-    Discovers all NIfTI files in data/raw/, processes each one, builds the
-    2.5D dataset arrays, evaluates the two baselines, and saves all outputs.
-    Files that fail to load are reported but do not stop the pipeline.
+    Uses a three-phase approach to avoid accumulating gigabytes of data in RAM:
+      Phase 1 — read only NIfTI headers to count the total number of pairs.
+      Phase 2 — pre-allocate numpy memmaps on disk (zero RAM cost).
+      Phase 3 — fill memmaps in-place; each scan is written then discarded.
     """
-    # Create output directories if they do not already exist.
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
     FIGURES_DIR.mkdir(parents=True, exist_ok=True)
     METRICS_DIR.mkdir(parents=True, exist_ok=True)
@@ -444,48 +444,114 @@ def main():
         print("No files found. Place raw .nii / .nii.gz scans in data/raw/ and re-run.")
         return
 
-    all_inputs, all_targets = [], []
+    # ------------------------------------------------------------------
+    # Phase 1 — header-only count (no voxel data loaded)
+    # ------------------------------------------------------------------
+    print("Phase 1: counting pairs from NIfTI headers...")
+    counted_files = []
+    total_pairs = 0
+    for filepath in nii_files:
+        try:
+            n_slices = nib.load(filepath).shape[2]   # header only, no pixel data
+            acquired = list(range(0, n_slices, ACCELERATION_FACTOR))
+            total_pairs += max(0, len(acquired) - 1)
+            counted_files.append(filepath)
+        except Exception as e:
+            print(f"  Header read failed: {os.path.basename(filepath)} — {e}")
+
+    print(f"  {len(counted_files)} files OK, {total_pairs:,} total pairs expected\n")
+    if total_pairs == 0:
+        print("No pairs to write. Aborting.")
+        return
+
+    # ------------------------------------------------------------------
+    # Phase 2 — pre-allocate memmaps on disk (zero RAM)
+    # ------------------------------------------------------------------
+    inputs_path  = PROCESSED_DIR / "dataset_inputs.npy"
+    targets_path = PROCESSED_DIR / "dataset_targets.npy"
+
+    print("Phase 2: pre-allocating memmaps on disk...")
+    dataset_inputs  = np.lib.format.open_memmap(
+        str(inputs_path),  mode="w+", dtype=np.float32,
+        shape=(total_pairs, 2, TARGET_SIZE[0], TARGET_SIZE[1]),
+    )
+    dataset_targets = np.lib.format.open_memmap(
+        str(targets_path), mode="w+", dtype=np.float32,
+        shape=(total_pairs, TARGET_SIZE[0], TARGET_SIZE[1]),
+    )
+    print(f"  {inputs_path.name}   shape={dataset_inputs.shape}")
+    print(f"  {targets_path.name}  shape={dataset_targets.shape}\n")
+
+    # ------------------------------------------------------------------
+    # Phase 3 — processing loop writes directly into the memmaps
+    # ------------------------------------------------------------------
     all_metrics_linear, all_metrics_spline = [], []
     failed_files = []
+    write_idx = 0
 
-    print(f"Processing {len(nii_files)} files...\n")
-    for file_idx, filepath in enumerate(nii_files):
+    print(f"Phase 3: processing {len(counted_files)} files...\n")
+    for file_idx, filepath in enumerate(counted_files):
         fname = os.path.basename(filepath)
         try:
-            # Steps a–d from the pipeline description at the top of this file.
             slices = load_and_preprocess(filepath)
             inputs, targets, _ = build_25D_dataset(slices, ACCELERATION_FACTOR)
-            all_inputs.append(inputs)
-            all_targets.append(targets)
+            n = len(inputs)
+            dataset_inputs[write_idx : write_idx + n]  = inputs
+            dataset_targets[write_idx : write_idx + n] = targets
+            write_idx += n
 
-            # Baseline evaluation uses the same missing indices derived from
-            # the same acceleration factor so scores are directly comparable.
             _, missing_idx = simulate_acquisition(slices, ACCELERATION_FACTOR)
-            recon_lin      = linear_interpolation(slices, ACCELERATION_FACTOR)
-            recon_spl      = spline_interpolation(slices, ACCELERATION_FACTOR)
-            m_lin          = evaluate_reconstruction(slices, recon_lin, missing_idx)
-            m_spl          = evaluate_reconstruction(slices, recon_spl, missing_idx)
+            recon_lin = linear_interpolation(slices, ACCELERATION_FACTOR)
+            recon_spl = spline_interpolation(slices, ACCELERATION_FACTOR)
+            m_lin     = evaluate_reconstruction(slices, recon_lin, missing_idx)
+            m_spl     = evaluate_reconstruction(slices, recon_spl, missing_idx)
             all_metrics_linear.append(m_lin)
             all_metrics_spline.append(m_spl)
 
             print(
-                f"[{file_idx+1:>3}/{len(nii_files)}] {fname:<55} "
-                f"slices={len(slices):>3}  pairs={len(inputs):>4}  "
+                f"[{file_idx+1:>3}/{len(counted_files)}] {fname:<55} "
+                f"slices={len(slices):>3}  pairs={n:>4}  "
                 f"PSNR_lin={m_lin['psnr_mean']:.2f}dB  "
                 f"PSNR_spl={m_spl['psnr_mean']:.2f}dB"
             )
         except Exception as e:
-            print(f"[{file_idx+1:>3}/{len(nii_files)}] FAILED: {fname} — {e}")
+            print(f"[{file_idx+1:>3}/{len(counted_files)}] FAILED: {fname} — {e}")
             failed_files.append(filepath)
 
-    # Concatenate per-scan lists into single dataset arrays.
-    dataset_inputs  = np.concatenate(all_inputs,  axis=0)  # (total_pairs, 2, 256, 256)
-    dataset_targets = np.concatenate(all_targets, axis=0)  # (total_pairs, 256, 256)
+    dataset_inputs.flush()
+    dataset_targets.flush()
 
-    np.save(PROCESSED_DIR / "dataset_inputs.npy",  dataset_inputs)
-    np.save(PROCESSED_DIR / "dataset_targets.npy", dataset_targets)
-    np.save(METRICS_DIR   / "baseline_metrics_linear.npy", all_metrics_linear)
-    np.save(METRICS_DIR   / "baseline_metrics_spline.npy", all_metrics_spline)
+    # If files failed after passing the header check, trim trailing zeros.
+    if write_idx < total_pairs:
+        print(
+            f"\nWarning: {total_pairs - write_idx} pre-allocated rows unused "
+            f"({len(failed_files)} file(s) failed after header check). Trimming..."
+        )
+        CHUNK = 256
+        tmp_in_path  = PROCESSED_DIR / "dataset_inputs.tmp.npy"
+        tmp_tgt_path = PROCESSED_DIR / "dataset_targets.tmp.npy"
+        trimmed_in  = np.lib.format.open_memmap(
+            str(tmp_in_path),  mode="w+", dtype=np.float32,
+            shape=(write_idx, 2, TARGET_SIZE[0], TARGET_SIZE[1]),
+        )
+        trimmed_tgt = np.lib.format.open_memmap(
+            str(tmp_tgt_path), mode="w+", dtype=np.float32,
+            shape=(write_idx, TARGET_SIZE[0], TARGET_SIZE[1]),
+        )
+        for start in range(0, write_idx, CHUNK):
+            end = min(start + CHUNK, write_idx)
+            trimmed_in[start:end]  = dataset_inputs[start:end]
+            trimmed_tgt[start:end] = dataset_targets[start:end]
+        trimmed_in.flush()
+        trimmed_tgt.flush()
+        del dataset_inputs, dataset_targets, trimmed_in, trimmed_tgt
+        os.replace(str(tmp_in_path),  str(inputs_path))
+        os.replace(str(tmp_tgt_path), str(targets_path))
+    else:
+        del dataset_inputs, dataset_targets
+
+    np.save(METRICS_DIR / "baseline_metrics_linear.npy", all_metrics_linear)
+    np.save(METRICS_DIR / "baseline_metrics_spline.npy", all_metrics_spline)
 
     agg_lin = aggregate_metrics(all_metrics_linear)
     agg_spl = aggregate_metrics(all_metrics_spline)
@@ -503,13 +569,15 @@ def main():
     )
 
     plot_baseline_distributions(
-        agg_lin, agg_spl, len(nii_files),
+        agg_lin, agg_spl, len(counted_files),
         save_path=FIGURES_DIR / "baseline_distributions.png",
     )
 
+    final_inputs  = np.load(inputs_path,  mmap_mode="r")
+    final_targets = np.load(targets_path, mmap_mode="r")
     print(f"\nOutputs saved to {PROCESSED_DIR}")
-    print(f"  dataset_inputs.npy  : {dataset_inputs.shape}")
-    print(f"  dataset_targets.npy : {dataset_targets.shape}")
+    print(f"  dataset_inputs.npy  : {final_inputs.shape}")
+    print(f"  dataset_targets.npy : {final_targets.shape}")
     if failed_files:
         print(f"  {len(failed_files)} file(s) failed")
 
