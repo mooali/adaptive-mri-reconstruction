@@ -25,39 +25,51 @@ venv/
 .ipynb_checkpoints/
 
 # =========================
-# Data (VERY IMPORTANT)
+# Data: ignore contents, keep folders
 # =========================
-data/
+data/raw/*
+data/processed/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+
 *.nii
 *.nii.gz
 *.npy
 *.npz
 
 # =========================
-# Models / Checkpoints
+# Models: ignore contents, keep folder
 # =========================
-models/
+models/*
+!models/.gitkeep
+
 *.pth
 *.pt
 *.ckpt
 
 # =========================
-# Outputs / Results
+# Outputs / Logs: ignore contents, keep folders
 # =========================
-outputs/
-logs/
+outputs/figures/*
+outputs/metrics/*
+outputs/explainability/*
+logs/*
+
+!outputs/figures/.gitkeep
+!outputs/metrics/.gitkeep
+!outputs/explainability/.gitkeep
+!logs/.gitkeep
+
 *.log
 *.out
 *.err
 
 # =========================
-# Figures / Plots (optional)
+# Optional: ignore generated figures globally
 # =========================
 *.png
 *.jpg
 *.jpeg
-
-# (Optional: comment above if you WANT to keep figures in repo)
 
 # =========================
 # VS Code / IDE
@@ -72,7 +84,7 @@ logs/
 *.cache
 
 # =========================
-# Misc
+# Archives
 # =========================
 *.zip
 *.tar

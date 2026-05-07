@@ -1,0 +1,16 @@
+========== EXPLAINABILITY SUMMARY ==========
+Mean IG — Left slice          : 9.20e-07 ± 5.30e-07
+Mean IG — Right slice         : 9.11e-07 ± 5.26e-07
+Mean Grad-CAM                 : 0.00858 ± 0.00581
+
+Left/Right IG ratio           : 1.0093  (1.0 = perfectly symmetric)
+
+MC Uncertainty (mean var)     : 7.44e-16 ± 5.24e-16
+
+Slice contribution — Left     : 0.0808 ± 0.0485
+Slice contribution — Right    : 0.0763 ± 0.0456
+Left/Right contribution ratio  : 1.0592
+
+Occlusion sensitivity — Left  : 0.0003 ± 0.0002
+Occlusion sensitivity — Right : 0.0003 ± 0.0002
+Left/Right occlusion ratio     : 1.0277
