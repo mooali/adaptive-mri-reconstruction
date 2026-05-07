@@ -134,5 +134,3 @@ N_EXPL_SAMPLES = 50
 # more accurate attribution but scale linearly in compute time.  50 provides
 # a good accuracy / speed trade-off for 256×256 inputs.
 IG_STEPS = 50
-
-

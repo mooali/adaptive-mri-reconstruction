@@ -461,6 +461,7 @@ def evaluate_test_set(model, loader, device):
     """
     model.eval()
     psnr_scores, ssim_scores, mae_scores = [], [], []
+    fg_mae_scores = []   # foreground-only MAE (brain pixels where gt > 0.02)
     with torch.no_grad():
         for x, y in loader:
             pred = model(x.to(device)).cpu().numpy()  # (B, 1, H, W)
@@ -470,8 +471,11 @@ def evaluate_test_set(model, loader, device):
                 psnr_scores.append(psnr(g, p, data_range=1.0))
                 ssim_scores.append(ssim(g, p, data_range=1.0))
                 mae_scores.append(float(np.mean(np.abs(g - p))))
+                fg = g > 0.02   # foreground mask: non-background pixels
+                if fg.any():
+                    fg_mae_scores.append(float(np.mean(np.abs(g[fg] - p[fg]))))
 
-    return {
+    result = {
         "psnr_mean"      : np.mean(psnr_scores),
         "psnr_std"       : np.std(psnr_scores),
         "ssim_mean"      : np.mean(ssim_scores),
@@ -482,6 +486,10 @@ def evaluate_test_set(model, loader, device):
         "per_sample_ssim": ssim_scores,
         "per_sample_mae" : mae_scores,
     }
+    if fg_mae_scores:
+        result["fg_mae_mean"] = np.mean(fg_mae_scores)
+        result["fg_mae_std"]  = np.std(fg_mae_scores)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -753,14 +761,23 @@ def main():
     print(f"{'SSIM':<10} {metrics['ssim_mean']:>10.4f} {metrics['ssim_std']:>10.4f}")
     print(f"{'MAE':<10} {metrics['mae_mean']:>10.5f} {metrics['mae_std']:>10.5f}")
 
-    # Hardcoded baseline numbers from the preprocess.py run (IXI dataset, ×2).
-    baseline_psnr = 33.21
-    baseline_ssim = 0.9066
-    print(
-        f"\n  Improvement over linear baseline: "
-        f"PSNR {metrics['psnr_mean'] - baseline_psnr:+.2f} dB  |  "
-        f"SSIM {metrics['ssim_mean'] - baseline_ssim:+.4f}"
-    )
+    if "fg_mae_mean" in metrics:
+        print(f"{'FG-MAE':<10} {metrics['fg_mae_mean']:>10.5f} {metrics['fg_mae_std']:>10.5f}")
+        print("  (FG-MAE = MAE over foreground pixels only, gt > 0.02)")
+
+    # Baseline comparison — IXI values only; BraTS PSNR is inflated by
+    # skull-stripped background zeros so the IXI baseline is not comparable.
+    if args.data == "ixi":
+        baseline_psnr = 33.21
+        baseline_ssim = 0.9066
+        print(
+            f"\n  Improvement over linear baseline: "
+            f"PSNR {metrics['psnr_mean'] - baseline_psnr:+.2f} dB  |  "
+            f"SSIM {metrics['ssim_mean'] - baseline_ssim:+.4f}"
+        )
+    else:
+        print("\n  Note: BraTS PSNR is inflated by skull-stripped background zeros.")
+        print("  Use FG-MAE (foreground MAE) as the primary metric for BraTS.")
 
     np.save(METRICS_DIR / f"unet_test_metrics{metrics_suffix}.npy", metrics)
     print(f"Metrics saved to {METRICS_DIR / f'unet_test_metrics{metrics_suffix}.npy'}")
