@@ -84,6 +84,7 @@ from src.config import (
     PROCESSED_DIR,
     MODELS_DIR,
     EXPLAINABILITY_DIR,
+    FIGURES_DIR,
     N_EXPL_SAMPLES,
     MC_DROPOUT_PASSES,
     MC_DROPOUT_P,
@@ -795,16 +796,34 @@ def main():
             model, autoencoder, anomaly_threshold,
             inputs, targets, int(idx), device, EXPLAINABILITY_DIR,
         )
-        results.append((int(idx), decision, score, anomaly_class, anomaly_score))
+        # Also record PSNR and SSIM for the scatter plot
+        x_np = np.array(inputs[int(idx)])
+        y_np = np.array(targets[int(idx)])
+        x_t  = torch.tensor(x_np, dtype=torch.float32).unsqueeze(0)
+        with torch.no_grad():
+            pred_np = model(x_t.to(device)).squeeze().cpu().numpy()
+        sample_psnr = psnr(y_np, pred_np, data_range=1.0)
+        sample_ssim = ssim(y_np, pred_np, data_range=1.0)
+        results.append((int(idx), decision, score, anomaly_class, anomaly_score,
+                        sample_psnr, sample_ssim))
         print()   # blank line between samples for readability
 
     # ── summary table ──────────────────────────────────────────────────────
-    n_safe       = sum(1 for _, d, *_ in results if d == "SAFE")
-    n_unsafe     = len(results) - n_safe
-    n_normal     = sum(1 for _, _, _, ac, _ in results if ac == "NORMAL")
+    # Recount after dynamic uncertainty threshold calibration:
+    # use 75th percentile of observed scores so the top 25% are flagged UNSAFE.
+    uncert_scores = [s    for _, _, s, _, _, _, _ in results]
+    anom_scores   = [a    for _, _, _, _, a, _, _ in results]
+    psnr_vals     = [p    for _, _, _, _, _, p, _ in results]
+    ssim_vals     = [s    for _, _, _, _, _, _, s in results]
+
+    adaptive_uncert_threshold = float(np.percentile(uncert_scores, 75))
+
+    n_normal     = sum(1 for _, _, _, ac, *_ in results if ac == "NORMAL")
     n_suspicious = len(results) - n_normal
-    uncert_scores = [s for _, _, s, _, _ in results]
-    anom_scores   = [a for _, _, _, _, a in results]
+    # Phase 3 uses the adaptive threshold; anomaly flag unchanged
+    n_unsafe  = sum(1 for _, _, s, _, a, _, _ in results
+                    if s > adaptive_uncert_threshold or a > anomaly_threshold)
+    n_safe    = len(results) - n_unsafe
 
     print("=" * 65)
     print("ADAPTIVE ACQUISITION SUMMARY")
@@ -818,10 +837,10 @@ def main():
     print(f"  Mean anomaly score            : {np.mean(anom_scores):.6f}")
     print(f"  Anomaly threshold             : {anomaly_threshold:.6f}")
     print(f"  --- Phase 3 (uncertainty) ---")
-    print(f"  Mean uncertainty score        : {np.mean(uncert_scores):.6f}")
-    print(f"  Min / Max uncertainty         : {np.min(uncert_scores):.6f} / "
-          f"{np.max(uncert_scores):.6f}")
-    print(f"  Uncertainty threshold         : {UNCERTAINTY_THRESHOLD}")
+    print(f"  Mean uncertainty score        : {np.mean(uncert_scores):.3e}")
+    print(f"  Min / Max uncertainty         : {np.min(uncert_scores):.3e} / "
+          f"{np.max(uncert_scores):.3e}")
+    print(f"  Threshold (p75 adaptive)      : {adaptive_uncert_threshold:.3e}")
     print(f"  --- Combined decision ---")
     print(f"  SAFE   (reconstruct)          : {n_safe}  "
           f"({100 * n_safe / len(results):.0f}%)")
@@ -829,6 +848,72 @@ def main():
           f"({100 * n_unsafe / len(results):.0f}%)")
     print("=" * 65)
     print(f"\nOutputs → {EXPLAINABILITY_DIR}")
+
+    # ── Uncertainty vs PSNR scatter plot ───────────────────────────────────
+    # Validates the adaptive gate: if uncertainty is a meaningful proxy for
+    # reconstruction quality, high-uncertainty samples should have low PSNR.
+    # Spearman correlation captures monotonic relationships (not just linear).
+    try:
+        from scipy.stats import spearmanr
+        uncert_arr = np.array(uncert_scores)
+        psnr_arr   = np.array(psnr_vals)
+        ssim_arr   = np.array(ssim_vals)
+
+        rho_psnr, p_psnr = spearmanr(uncert_arr, psnr_arr)
+        rho_ssim, p_ssim = spearmanr(uncert_arr, ssim_arr)
+
+        print(f"\n  Spearman ρ (uncertainty vs PSNR) : {rho_psnr:+.3f}  (p={p_psnr:.3f})")
+        print(f"  Spearman ρ (uncertainty vs SSIM) : {rho_ssim:+.3f}  (p={p_ssim:.3f})")
+        if rho_psnr < -0.3:
+            print("  → Negative correlation: higher uncertainty predicts lower PSNR ✓")
+        else:
+            print("  → Weak/no correlation: uncertainty may not track reconstruction quality here")
+
+        fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+        fig.suptitle(
+            f"Uncertainty vs Reconstruction Quality (N={len(results)} samples)\n"
+            f"Spearman ρ: uncertainty↔PSNR = {rho_psnr:+.3f} (p={p_psnr:.3f}), "
+            f"uncertainty↔SSIM = {rho_ssim:+.3f} (p={p_ssim:.3f})",
+            fontsize=11, fontweight="bold",
+        )
+
+        for ax, yvals, ylabel, rho, p_val in [
+            (axes[0], psnr_arr, "PSNR (dB)", rho_psnr, p_psnr),
+            (axes[1], ssim_arr, "SSIM",      rho_ssim, p_ssim),
+        ]:
+            colors = ["tomato" if d == "UNSAFE" else "steelblue"
+                      for _, d, *_ in results]
+            ax.scatter(uncert_arr, yvals, c=colors, alpha=0.75, s=60, edgecolors="none")
+            ax.axvline(UNCERTAINTY_THRESHOLD, color="black", linestyle="--",
+                       linewidth=1.5, label=f"Threshold={UNCERTAINTY_THRESHOLD}")
+            # Trend line
+            z = np.polyfit(uncert_arr, yvals, 1)
+            xfit = np.linspace(uncert_arr.min(), uncert_arr.max(), 100)
+            ax.plot(xfit, np.polyval(z, xfit), color="gray", linestyle="-",
+                    linewidth=1.5, alpha=0.8, label="Linear fit")
+            ax.set_xlabel("MC-Dropout Uncertainty Score (pixel variance)")
+            ax.set_ylabel(ylabel)
+            ax.set_title(f"ρ = {rho:+.3f}  (p={p_val:.3f})", fontsize=10)
+            # Legend: coloured dots for SAFE/UNSAFE
+            from matplotlib.lines import Line2D
+            legend_els = [
+                Line2D([0], [0], marker='o', color='w', markerfacecolor='steelblue',
+                       markersize=9, label='SAFE'),
+                Line2D([0], [0], marker='o', color='w', markerfacecolor='tomato',
+                       markersize=9, label='UNSAFE'),
+                Line2D([0], [0], color='black', linestyle='--', label='Threshold'),
+            ]
+            ax.legend(handles=legend_els, fontsize=9)
+            ax.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        scatter_path = FIGURES_DIR / "uncertainty_vs_quality.png"
+        FIGURES_DIR.mkdir(parents=True, exist_ok=True)
+        plt.savefig(scatter_path, dpi=150, bbox_inches="tight")
+        plt.close()
+        print(f"  Saved scatter plot → {scatter_path.name}")
+    except ImportError:
+        print("\n  (Install scipy for Spearman correlation: pip install scipy)")
 
 
 if __name__ == "__main__":

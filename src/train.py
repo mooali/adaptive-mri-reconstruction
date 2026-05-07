@@ -260,8 +260,78 @@ class UNet(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Loss function
+# Ablation model — PlainCNN (U-Net without skip connections)
 # ---------------------------------------------------------------------------
+
+class PlainCNN(nn.Module):
+    """
+    Encoder-decoder CNN identical to UNet but WITHOUT skip connections.
+
+    Used as an ablation study to quantify the contribution of skip connections.
+    The encoder and decoder channel counts match UNet exactly so the only
+    difference is the absence of the concatenation step in the decoder.
+
+    Without skip connections the decoder must reconstruct fine spatial detail
+    (sharp edges, sulci, gyri boundaries) entirely from the compressed
+    bottleneck representation.  Comparing PlainCNN vs UNet metrics shows
+    exactly how much PSNR/SSIM the skip connections contribute.
+
+    Architecture
+    ------------
+    Encoder     : same as UNet — 4 × (ConvBlock → MaxPool)
+    Bottleneck  : same as UNet — ConvBlock(256 → 512)
+    Decoder     : 4 × (ConvTranspose2d → ConvBlock)  — NO skip concat
+                  channels: 512 → 256 → 128 → 64 → 32
+    Output head : same as UNet — Conv2d(32 → 1) + Sigmoid
+
+    Parameters / inputs / outputs are identical to UNet.
+    """
+
+    def __init__(self, in_channels=IN_CHANNELS, out_channels=OUT_CHANNELS, features=None):
+        super().__init__()
+        if features is None:
+            features = UNET_FEATURES
+
+        # ── Encoder ──────────────────────────────────────────────────────
+        self.encoders = nn.ModuleList()
+        self.pools    = nn.ModuleList()
+        ch = in_channels
+        for f in features:
+            self.encoders.append(ConvBlock(ch, f))
+            self.pools.append(nn.MaxPool2d(2))
+            ch = f
+
+        # ── Bottleneck ────────────────────────────────────────────────────
+        self.bottleneck = ConvBlock(features[-1], features[-1] * 2)
+
+        # ── Decoder — no skip connections, channels halved each level ────
+        self.upconvs  = nn.ModuleList()
+        self.decoders = nn.ModuleList()
+        ch = features[-1] * 2
+        for f in reversed(features):
+            self.upconvs.append(nn.ConvTranspose2d(ch, f, kernel_size=2, stride=2))
+            # Input is f (from upconv only — no skip concat), output is f.
+            self.decoders.append(ConvBlock(f, f))
+            ch = f
+
+        # ── Output head ──────────────────────────────────────────────────
+        self.output_conv = nn.Conv2d(features[0], out_channels, kernel_size=1)
+        self.sigmoid     = nn.Sigmoid()
+
+    def forward(self, x):
+        # Encoder: discard skip connections (not used in decoder).
+        for enc, pool in zip(self.encoders, self.pools):
+            x = enc(x)
+            x = pool(x)
+
+        x = self.bottleneck(x)
+
+        # Decoder: upsample + refine, no concatenation with encoder features.
+        for upconv, dec in zip(self.upconvs, self.decoders):
+            x = upconv(x)
+            x = dec(x)
+
+        return self.sigmoid(self.output_conv(x))
 
 class CombinedLoss(nn.Module):
     """
@@ -554,6 +624,24 @@ def main():
     whenever validation loss improves, and all outputs are written to the
     directories defined in config.py.
     """
+    import argparse
+    parser = argparse.ArgumentParser(description="Train MRI slice interpolation model.")
+    parser.add_argument(
+        "--model", choices=["unet", "plaincnn"], default="unet",
+        help="Architecture to train. 'unet' (default) = full U-Net with skip connections. "
+             "'plaincnn' = ablation without skip connections.",
+    )
+    parser.add_argument(
+        "--data", choices=["ixi", "brats"], default="ixi",
+        help="Dataset to use: 'ixi' (default, data/processed/dataset_*.npy) or "
+             "'brats' (data/processed/brats_*.npy).",
+    )
+    parser.add_argument(
+        "--eval-only", action="store_true",
+        help="Skip training; load existing checkpoint and run test-set evaluation only.",
+    )
+    args = parser.parse_args()
+
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
     FIGURES_DIR.mkdir(parents=True, exist_ok=True)
     METRICS_DIR.mkdir(parents=True, exist_ok=True)
@@ -561,8 +649,15 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    inputs_path  = PROCESSED_DIR / "dataset_inputs.npy"
-    targets_path = PROCESSED_DIR / "dataset_targets.npy"
+    if args.data == "brats":
+        from src.config import BRATS_INPUTS_PATH, BRATS_TARGETS_PATH
+        inputs_path  = BRATS_INPUTS_PATH
+        targets_path = BRATS_TARGETS_PATH
+        print("Dataset: BraTS2020 reconstruction pairs")
+    else:
+        inputs_path  = PROCESSED_DIR / "dataset_inputs.npy"
+        targets_path = PROCESSED_DIR / "dataset_targets.npy"
+        print("Dataset: IXI")
 
     # Peek at the total number of samples using a memory-mapped read so we
     # do not load the full array just to get its length.
@@ -593,47 +688,65 @@ def main():
 
     print(f"Train: {len(train_set):,}  Val: {len(val_set):,}  Test: {len(test_set):,}")
 
-    model     = UNet().to(device)
+    # ── Model selection ───────────────────────────────────────────────────
+    data_suffix = "_brats" if args.data == "brats" else ""
+
+    if args.model == "plaincnn":
+        model      = PlainCNN().to(device)
+        model_name = "PlainCNN (no skip connections)"
+        model_path = MODELS_DIR / f"plaincnn_best{data_suffix}.pth"
+        metrics_suffix = f"_plaincnn{data_suffix}"
+        figures_suffix = f"_plaincnn{data_suffix}"
+    else:
+        model      = UNet().to(device)
+        model_name = "U-Net"
+        model_path = MODELS_DIR / f"unet_best{data_suffix}.pth"
+        metrics_suffix = data_suffix
+        figures_suffix = data_suffix
+
     criterion = CombinedLoss()
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
     # Halve the LR if val loss does not improve for 5 consecutive epochs.
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=5)
 
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"U-Net parameters: {total_params:,}")
+    print(f"{model_name} parameters: {total_params:,}")
 
-    model_path = MODELS_DIR / "unet_best.pth"
     best_val   = float("inf")
     history    = {"train_loss": [], "val_loss": []}
 
-    print(f"\nTraining for {NUM_EPOCHS} epochs...\n")
-    print(f"{'Epoch':>6} | {'Train Loss':>12} | {'Val Loss':>12} | {'LR':>10}")
-    print("-" * 50)
+    if args.eval_only:
+        if not model_path.exists():
+            raise FileNotFoundError(f"No checkpoint found at {model_path}. Run without --eval-only first.")
+        print(f"\nEval-only mode — loading {model_path.name}")
+    else:
+        print(f"\nTraining for {NUM_EPOCHS} epochs...\n")
+        print(f"{'Epoch':>6} | {'Train Loss':>12} | {'Val Loss':>12} | {'LR':>10}")
+        print("-" * 50)
 
-    for epoch in range(1, NUM_EPOCHS + 1):
-        train_loss = train_epoch(model, train_loader, optimizer, criterion, device)
-        val_loss   = val_epoch(model, val_loader, criterion, device)
-        scheduler.step(val_loss)   # pass current val loss to the LR scheduler
-        history["train_loss"].append(train_loss)
-        history["val_loss"].append(val_loss)
+        for epoch in range(1, NUM_EPOCHS + 1):
+            train_loss = train_epoch(model, train_loader, optimizer, criterion, device)
+            val_loss   = val_epoch(model, val_loader, criterion, device)
+            scheduler.step(val_loss)
+            history["train_loss"].append(train_loss)
+            history["val_loss"].append(val_loss)
 
-        lr = optimizer.param_groups[0]["lr"]
-        print(f"{epoch:>6} | {train_loss:>12.6f} | {val_loss:>12.6f} | {lr:>10.2e}")
+            lr = optimizer.param_groups[0]["lr"]
+            print(f"{epoch:>6} | {train_loss:>12.6f} | {val_loss:>12.6f} | {lr:>10.2e}")
 
-        # Overwrite checkpoint only when this epoch is the best so far.
-        if val_loss < best_val:
-            best_val = val_loss
-            torch.save(model.state_dict(), model_path)
-            print(f"         >> Best model saved (val_loss={best_val:.6f})")
+            if val_loss < best_val:
+                best_val = val_loss
+                torch.save(model.state_dict(), model_path)
+                print(f"         >> Best model saved (val_loss={best_val:.6f})")
 
-    print(f"\nTraining complete. Best val loss: {best_val:.6f}")
-    plot_training_curves(history, save_path=FIGURES_DIR / "training_curves.png")
+        print(f"\nTraining complete. Best val loss: {best_val:.6f}")
+        plot_training_curves(history, save_path=FIGURES_DIR / f"training_curves{figures_suffix}.png")
 
     # Reload the best weights (not necessarily the last epoch) for evaluation.
     model.load_state_dict(torch.load(model_path, map_location=device))
     metrics = evaluate_test_set(model, test_loader, device)
 
-    print("\n========== TEST SET RESULTS ==========")
+    print(f"\n========== TEST SET RESULTS — {model_name} ==========")
     print(f"{'Metric':<10} {'Mean':>10} {'Std':>10}")
     print("-" * 32)
     print(f"{'PSNR':<10} {metrics['psnr_mean']:>9.2f}dB {metrics['psnr_std']:>9.2f}")
@@ -649,12 +762,12 @@ def main():
         f"SSIM {metrics['ssim_mean'] - baseline_ssim:+.4f}"
     )
 
-    np.save(METRICS_DIR / "unet_test_metrics.npy", metrics)
-    print(f"Metrics saved to {METRICS_DIR / 'unet_test_metrics.npy'}")
+    np.save(METRICS_DIR / f"unet_test_metrics{metrics_suffix}.npy", metrics)
+    print(f"Metrics saved to {METRICS_DIR / f'unet_test_metrics{metrics_suffix}.npy'}")
 
     visualize_predictions(model, test_set, device, n_samples=4,
-                          save_path=FIGURES_DIR / "predictions.png")
-    plot_metric_distributions(metrics, save_path=FIGURES_DIR / "metric_distributions.png")
+                          save_path=FIGURES_DIR / f"predictions{figures_suffix}.png")
+    plot_metric_distributions(metrics, save_path=FIGURES_DIR / f"metric_distributions{figures_suffix}.png")
 
 
 if __name__ == "__main__":

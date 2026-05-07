@@ -1,16 +1,16 @@
 #!/usr/bin/env python
 """
-src/preprocess_brats.py — Preprocess BraTS2020 H5 slices into numpy arrays.
+src/preprocess_brats.py — Build 2.5D reconstruction pairs from BraTS2020 H5 slices.
 
 Reads per-slice H5 files, groups them by patient volume, applies the same
-resize + volume-level normalisation pipeline used for IXI data, then splits
-slices by tumour label and saves two memory-mapped numpy arrays:
+resize + volume-level normalisation pipeline used for IXI, then builds 2.5D
+input-target pairs using simulate_acquisition / build_25D_dataset from
+preprocess.py.
 
-  data/processed/brats_healthy.npy   shape (S_h, 256, 256)  float32
-  data/processed/brats_tumor.npy     shape (S_t, 256, 256)  float32
-
-The healthy array is the training corpus for the BraTS-domain autoencoder.
-The tumor array is the test set for anomaly detection evaluation.
+Outputs
+-------
+  data/processed/brats_inputs.npy    shape (N, 2, 256, 256)  float32
+  data/processed/brats_targets.npy   shape (N, 256, 256)     float32
 
 Usage
 -----
@@ -23,7 +23,6 @@ BraTS H5 format
 ---------------
   Each file covers one axial slice: image shape (H, W, 4) channels-last.
   Channels: [FLAIR=0, T1=1, T1ce=2, T2=3]
-  Mask shape (H, W, 3): any non-zero value means the slice contains tumour.
 """
 
 import argparse
@@ -40,20 +39,21 @@ from src.config import (
     ROOT_DIR,
     PROCESSED_DIR,
     TARGET_SIZE,
+    ACCELERATION_FACTOR,
     BRATS_DIR,
-    BRATS_HEALTHY_PATH,
-    BRATS_TUMOR_PATH,
+    BRATS_INPUTS_PATH,
+    BRATS_TARGETS_PATH,
 )
-from src.preprocess import resize_volume, normalize_volume
+from src.preprocess import resize_volume, normalize_volume, build_25D_dataset
 
 
 # ---------------------------------------------------------------------------
-# Volume loading helpers  (same logic as evaluate_brats.py)
+# Volume loading helper
 # ---------------------------------------------------------------------------
 
 def _load_volume(slice_files, channel):
     """
-    Stack per-slice H5 files into a (H, W, D) volume and collect tumour flags.
+    Stack sorted per-slice H5 files into a (H, W, D) volume.
 
     Parameters
     ----------
@@ -62,31 +62,31 @@ def _load_volume(slice_files, channel):
 
     Returns
     -------
-    vol       : np.ndarray  (H, W, D)  float32  raw intensities
-    has_tumor : np.ndarray  (D,)       bool     True if slice has any mask label
+    vol : np.ndarray  (H, W, D)  float32
     """
-    imgs, flags = [], []
+    imgs = []
     for fp in slice_files:
         with h5py.File(fp, "r") as f:
-            img  = f["image"][()]               # (H, W, 4)
-            mask = f["mask"][()] if "mask" in f else None
+            img = f["image"][()]               # (H, W, 4)
         imgs.append(img[:, :, channel].astype(np.float32))
-        flags.append(bool(mask is not None and mask.any()))
-    vol = np.stack(imgs, axis=2)               # (H, W, D)
-    return vol, np.array(flags, dtype=bool)
+    return np.stack(imgs, axis=2)              # (H, W, D)
 
 
 def _preprocess_volume(vol):
     """
     Resize to 256×256 and normalise the full volume to [0, 1].
 
-    Returns
-    -------
-    slices : np.ndarray  (D, 256, 256)  float32
+    Returns (D, 256, 256) float32.
     """
-    vol    = resize_volume(vol)        # (256, 256, D)
-    vol    = normalize_volume(vol)     # volume-level min-max
-    return np.moveaxis(vol, -1, 0)    # (D, 256, 256)
+    vol = resize_volume(vol)      # (256, 256, D)
+    vol = normalize_volume(vol)   # volume-level min-max → [0, 1]
+    return np.moveaxis(vol, -1, 0)  # (D, 256, 256)
+
+
+def _count_pairs(n_slices, acceleration_factor=ACCELERATION_FACTOR):
+    """Number of 2.5D pairs produced by build_25D_dataset for a volume with n_slices."""
+    n_acquired = len(range(0, n_slices, acceleration_factor))
+    return max(0, n_acquired - 1)
 
 
 # ---------------------------------------------------------------------------
@@ -95,7 +95,7 @@ def _preprocess_volume(vol):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Preprocess BraTS2020 H5 slices → numpy arrays for training."
+        description="Preprocess BraTS2020 H5 slices → 2.5D reconstruction pairs."
     )
     parser.add_argument(
         "--brats-dir", default=None,
@@ -120,13 +120,13 @@ def main():
     if not brats_path.is_absolute():
         brats_path = ROOT_DIR / brats_path
 
-    healthy_out = BRATS_HEALTHY_PATH
-    tumor_out   = BRATS_TUMOR_PATH
+    inputs_out  = BRATS_INPUTS_PATH
+    targets_out = BRATS_TARGETS_PATH
 
-    if healthy_out.exists() and tumor_out.exists() and not args.force:
-        print(f"Preprocessed arrays already exist:")
-        print(f"  {healthy_out}  shape={np.load(healthy_out, mmap_mode='r').shape}")
-        print(f"  {tumor_out}  shape={np.load(tumor_out, mmap_mode='r').shape}")
+    if inputs_out.exists() and targets_out.exists() and not args.force:
+        print("Preprocessed arrays already exist:")
+        print(f"  {inputs_out}  shape={np.load(inputs_out, mmap_mode='r').shape}")
+        print(f"  {targets_out}  shape={np.load(targets_out, mmap_mode='r').shape}")
         print("Use --force to reprocess.")
         return
 
@@ -157,105 +157,92 @@ def main():
     print(f"Found {len(h5_files):,} H5 files → {len(vol_map)} volumes  "
           f"(processing {len(volume_keys)})")
     print(f"Channel: {args.channel}  (0=FLAIR, 1=T1, 2=T1ce, 3=T2)")
+    print(f"Acceleration: ×{ACCELERATION_FACTOR}")
 
-    # ── Phase 1: count slices ──────────────────────────────────────────────
-    print("\nPhase 1 — counting slices per volume...")
-    n_healthy = 0
-    n_tumor   = 0
-    failed    = []
+    # ── Phase 1: count total pairs ─────────────────────────────────────────
+    print("\nPhase 1 — counting reconstruction pairs per volume...")
+    n_pairs_total = 0
+    failed        = []
 
     for i, vkey in enumerate(volume_keys):
         try:
-            _, has_tumor = _load_volume(vol_map[vkey], channel=args.channel)
-            n_healthy += int((~has_tumor).sum())
-            n_tumor   += int(has_tumor.sum())
+            n_slices = len(vol_map[vkey])
+            n_pairs_total += _count_pairs(n_slices)
         except Exception as e:
             print(f"  [{i+1}] FAILED vol={vkey}: {e}")
             failed.append(vkey)
-        if (i + 1) % 50 == 0:
-            print(f"  Counted {i+1}/{len(volume_keys)} volumes  "
-                  f"(healthy={n_healthy:,}  tumor={n_tumor:,})")
+        if (i + 1) % 100 == 0:
+            print(f"  Counted {i+1}/{len(volume_keys)} volumes  pairs so far={n_pairs_total:,}")
 
     for k in failed:
         volume_keys.remove(k)
 
-    print(f"\nTotal slices — healthy: {n_healthy:,}   tumor: {n_tumor:,}")
-    if n_healthy == 0:
-        raise RuntimeError("No healthy slices found — check --channel and --brats-dir.")
+    print(f"\nTotal reconstruction pairs: {n_pairs_total:,}")
+    if n_pairs_total == 0:
+        raise RuntimeError("No pairs found — check --brats-dir and --channel.")
 
-    # ── Phase 2: pre-allocate memory-mapped arrays ────────────────────────
+    # ── Phase 2: pre-allocate memory-mapped arrays ─────────────────────────
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
     H, W = TARGET_SIZE
 
     print(f"\nPhase 2 — pre-allocating arrays on disk...")
-    mm_healthy = np.lib.format.open_memmap(
-        str(healthy_out), mode="w+", dtype=np.float32, shape=(n_healthy, H, W)
+    mm_inputs  = np.lib.format.open_memmap(
+        str(inputs_out),  mode="w+", dtype=np.float32, shape=(n_pairs_total, 2, H, W)
     )
-    mm_tumor = np.lib.format.open_memmap(
-        str(tumor_out), mode="w+", dtype=np.float32, shape=(n_tumor, H, W)
+    mm_targets = np.lib.format.open_memmap(
+        str(targets_out), mode="w+", dtype=np.float32, shape=(n_pairs_total, H, W)
     )
-    size_gb_h = n_healthy * H * W * 4 / 1e9
-    size_gb_t = n_tumor   * H * W * 4 / 1e9
-    print(f"  {healthy_out.name}  {mm_healthy.shape}  ({size_gb_h:.2f} GB)")
-    print(f"  {tumor_out.name}  {mm_tumor.shape}  ({size_gb_t:.2f} GB)")
+    size_in  = n_pairs_total * 2 * H * W * 4 / 1e9
+    size_tgt = n_pairs_total *     H * W * 4 / 1e9
+    print(f"  {inputs_out.name}   {mm_inputs.shape}   ({size_in:.2f} GB)")
+    print(f"  {targets_out.name}  {mm_targets.shape}  ({size_tgt:.2f} GB)")
 
     # ── Phase 3: fill arrays ───────────────────────────────────────────────
-    print(f"\nPhase 3 — preprocessing and writing slices...")
-    hi = 0   # write cursor for healthy
-    ti = 0   # write cursor for tumor
+    print(f"\nPhase 3 — preprocessing volumes and writing pairs...")
+    cursor = 0
 
     for i, vkey in enumerate(volume_keys):
         try:
-            vol, has_tumor = _load_volume(vol_map[vkey], channel=args.channel)
-            slices = _preprocess_volume(vol)    # (D, 256, 256)
+            vol    = _load_volume(vol_map[vkey], channel=args.channel)
+            slices = _preprocess_volume(vol)              # (D, 256, 256)
+            inputs, targets, _ = build_25D_dataset(slices, ACCELERATION_FACTOR)
 
-            healthy_slices = slices[~has_tumor]
-            tumor_slices   = slices[has_tumor]
-
-            if len(healthy_slices):
-                mm_healthy[hi : hi + len(healthy_slices)] = healthy_slices
-                hi += len(healthy_slices)
-            if len(tumor_slices):
-                mm_tumor[ti : ti + len(tumor_slices)] = tumor_slices
-                ti += len(tumor_slices)
+            n = len(inputs)
+            if n:
+                mm_inputs[cursor : cursor + n]  = inputs
+                mm_targets[cursor : cursor + n] = targets
+                cursor += n
 
         except Exception as e:
             print(f"  [{i+1}] FAILED vol={vkey}: {e}")
 
         if (i + 1) % 50 == 0 or (i + 1) == len(volume_keys):
-            print(f"  [{i+1:>3}/{len(volume_keys)}]  written  "
-                  f"healthy={hi:>6,}  tumor={ti:>6,}")
+            print(f"  [{i+1:>3}/{len(volume_keys)}]  written pairs={cursor:>7,}")
 
     # Trim if any volumes failed during phase 3
-    if hi < n_healthy:
-        print(f"  Trimming healthy array: {n_healthy} → {hi}")
-        final_healthy = np.lib.format.open_memmap(
-            str(healthy_out.with_name("_tmp_h.npy")), mode="w+",
-            dtype=np.float32, shape=(hi, H, W)
+    if cursor < n_pairs_total:
+        print(f"\nTrimming arrays: {n_pairs_total} → {cursor} pairs")
+        tmp_in  = inputs_out.with_name("_tmp_inputs.npy")
+        tmp_tgt = targets_out.with_name("_tmp_targets.npy")
+        final_in = np.lib.format.open_memmap(
+            str(tmp_in),  mode="w+", dtype=np.float32, shape=(cursor, 2, H, W)
         )
-        final_healthy[:] = mm_healthy[:hi]
-        del mm_healthy, final_healthy
-        healthy_out.with_name("_tmp_h.npy").replace(healthy_out)
-    else:
-        del mm_healthy
-
-    if ti < n_tumor:
-        print(f"  Trimming tumor array: {n_tumor} → {ti}")
-        final_tumor = np.lib.format.open_memmap(
-            str(tumor_out.with_name("_tmp_t.npy")), mode="w+",
-            dtype=np.float32, shape=(ti, H, W)
+        final_tgt = np.lib.format.open_memmap(
+            str(tmp_tgt), mode="w+", dtype=np.float32, shape=(cursor, H, W)
         )
-        final_tumor[:] = mm_tumor[:ti]
-        del mm_tumor, final_tumor
-        tumor_out.with_name("_tmp_t.npy").replace(tumor_out)
+        final_in[:]  = mm_inputs[:cursor]
+        final_tgt[:] = mm_targets[:cursor]
+        del mm_inputs, mm_targets, final_in, final_tgt
+        tmp_in.replace(inputs_out)
+        tmp_tgt.replace(targets_out)
     else:
-        del mm_tumor
+        del mm_inputs, mm_targets
 
     print(f"\nDone.")
-    print(f"  {healthy_out}  shape=({hi}, {H}, {W})")
-    print(f"  {tumor_out}  shape=({ti}, {H}, {W})")
-    print(f"\nNext step — train anomaly detector on BraTS healthy slices:")
-    print(f"  python -m src.evaluate_brats --use-preprocessed --retrain-on-brats")
+    print(f"  {inputs_out}   shape=({cursor}, 2, {H}, {W})")
+    print(f"  {targets_out}  shape=({cursor}, {H}, {W})")
+    print(f"\nNext step — train U-Net on BraTS reconstruction pairs:")
+    print(f"  python -m src.train --data brats")
 
 
 if __name__ == "__main__":

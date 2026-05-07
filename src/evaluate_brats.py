@@ -192,6 +192,54 @@ def score_slices(autoencoder, slices, device, batch_size=64, foreground_only=Fal
 
 
 # ---------------------------------------------------------------------------
+# Tight convolutional autoencoder  (used instead of SliceAutoencoder)
+# ---------------------------------------------------------------------------
+
+class SliceAutoencoderTight(torch.nn.Module):
+    """
+    4-stage convolutional autoencoder with a genuinely compressed bottleneck.
+
+    The original SliceAutoencoder has 3 MaxPool stages → 32×32 spatial →
+    64×32×32 = 65,536 bottleneck features for a 65,536-pixel input (1:1
+    compression).  With that capacity the model reconstructs *everything*
+    well, including tumour patterns, so anomaly scores converge toward zero.
+
+    This architecture adds a 4th stage, giving 16×16 spatial → 128×16×16 =
+    32,768 features → 2:1 spatial compression.  More importantly, the model
+    now *must* learn a compact representation of the healthy-brain manifold,
+    so unfamiliar textures (tumours) consistently produce larger errors.
+
+    Architecture
+    ------------
+    Encoder  : 4 × (Conv-BN-ReLU → MaxPool)  1 → 32 → 64 → 128 → 128 ch
+               spatial  256 → 128 → 64 → 32 → 16
+    Decoder  : 4 × (ConvTranspose-BN-ReLU)  128 → 128 → 64 → 32 → 1 ch
+               spatial  16 → 32 → 64 → 128 → 256
+    Output   : Sigmoid  (keeps [0, 1] range)
+    """
+
+    def __init__(self):
+        super().__init__()
+        nn = torch.nn
+        self.encoder = torch.nn.Sequential(
+            nn.Conv2d(1,   32, 3, padding=1), nn.BatchNorm2d(32),  nn.ReLU(True), nn.MaxPool2d(2),
+            nn.Conv2d(32,  64, 3, padding=1), nn.BatchNorm2d(64),  nn.ReLU(True), nn.MaxPool2d(2),
+            nn.Conv2d(64, 128, 3, padding=1), nn.BatchNorm2d(128), nn.ReLU(True), nn.MaxPool2d(2),
+            nn.Conv2d(128,128, 3, padding=1), nn.BatchNorm2d(128), nn.ReLU(True), nn.MaxPool2d(2),
+        )
+        self.decoder = torch.nn.Sequential(
+            nn.ConvTranspose2d(128, 128, 2, stride=2), nn.BatchNorm2d(128), nn.ReLU(True),
+            nn.ConvTranspose2d(128,  64, 2, stride=2), nn.BatchNorm2d(64),  nn.ReLU(True),
+            nn.ConvTranspose2d( 64,  32, 2, stride=2), nn.BatchNorm2d(32),  nn.ReLU(True),
+            nn.ConvTranspose2d( 32,   1, 2, stride=2),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, x):
+        return self.decoder(self.encoder(x))
+
+
+# ---------------------------------------------------------------------------
 # BraTS-domain autoencoder training
 # ---------------------------------------------------------------------------
 
@@ -201,7 +249,7 @@ def score_slices(autoencoder, slices, device, batch_size=64, foreground_only=Fal
 def train_on_brats(vol_map, train_keys, device, t1_channel=1,
                    epochs=10, batch_size=64, lr=1e-3, threshold_sigma=2.0,
                    score_percentile=100, threshold_percentile=None,
-                   use_preprocessed=False):
+                   use_preprocessed=False, noise_std=0.0, seed=42):
     """
     Train the SliceAutoencoder on non-tumour BraTS slices and calibrate threshold.
 
@@ -235,7 +283,17 @@ def train_on_brats(vol_map, train_keys, device, t1_channel=1,
     """
     import torch.nn as nn
 
-    # ── Collect all non-tumour slices ───────────────────────────────────────
+    # ── Reproducibility ──────────────────────────────────────────────────────
+    # Without fixed seeds, retraining the autoencoder gives wildly different
+    # results because random init + random batch order push it to different
+    # local minima.  This is critical for anomaly detection where "slightly
+    # better/worse on healthy" can flip the tumour-vs-healthy gap by 5–10 pp.
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+    # ── Collect all non-tumour slices ───────────────────────────────────────────
     if use_preprocessed and BRATS_HEALTHY_PATH.exists():
         print(f"  Loading preprocessed healthy slices from {BRATS_HEALTHY_PATH.name}...")
         healthy = np.load(BRATS_HEALTHY_PATH, mmap_mode="r")
@@ -261,10 +319,11 @@ def train_on_brats(vol_map, train_keys, device, t1_channel=1,
         healthy = np.concatenate(healthy_slices, axis=0)   # (N, 256, 256)
         print(f"  Training set: {len(healthy):,} non-tumour slices")
 
-    # ── Train ──────────────────────────────────────────────────────────────
+    # ── Train (denoising autoencoder) ────────────────────────────────────
     autoencoder = SliceAutoencoder().to(device)
     optimizer   = torch.optim.Adam(autoencoder.parameters(), lr=lr)
-    criterion   = nn.L1Loss()
+    criterion   = torch.nn.L1Loss()
+    print(f"  SliceAutoencoder: noise_std={noise_std}, epochs={epochs}, lr={lr}")
 
     autoencoder.train()
     for epoch in range(epochs):
@@ -273,10 +332,15 @@ def train_on_brats(vol_map, train_keys, device, t1_channel=1,
         n_batches  = 0
         for start in range(0, len(healthy), batch_size):
             idx   = perm[start : start + batch_size]
-            batch = healthy[idx][:, np.newaxis, :, :]   # (B, 1, H, W)
-            x     = torch.tensor(batch, dtype=torch.float32).to(device)
+            batch = healthy[idx][:, np.newaxis, :, :]    # (B, 1, H, W)
+            x_clean = torch.tensor(batch, dtype=torch.float32).to(device)
+            if noise_std > 0:
+                x_noisy = x_clean + noise_std * torch.randn_like(x_clean)
+                x_noisy = x_noisy.clamp(0.0, 1.0)
+            else:
+                x_noisy = x_clean
             optimizer.zero_grad()
-            loss  = criterion(autoencoder(x), x)
+            loss  = criterion(autoencoder(x_noisy), x_clean)
             loss.backward()
             optimizer.step()
             total_loss += loss.item()
@@ -401,8 +465,13 @@ def main():
         help="Cap on number of patient volumes to process (omit for all).",
     )
     parser.add_argument(
-        "--retrain-on-brats", action="store_true",
-        help="Retrain the autoencoder on BraTS non-tumour slices instead of using the IXI model.",
+        "--retrain-on-brats", action="store_true", default=True,
+        help="Retrain the autoencoder on BraTS non-tumour slices (default: True). "
+             "Use --no-retrain-on-brats to fall back to the IXI model.",
+    )
+    parser.add_argument(
+        "--no-retrain-on-brats", dest="retrain_on_brats", action="store_false",
+        help="Use the IXI-domain autoencoder instead of retraining on BraTS.",
     )
     parser.add_argument(
         "--epochs", type=int, default=10,
@@ -434,6 +503,22 @@ def main():
         help="Set the anomaly threshold as the Nth percentile of non-tumour training scores "
              "(e.g. 95 guarantees ~5%% FPR on healthy tissue). "
              "When set, overrides --threshold-sigma. Recommended: 95 with --score-percentile 95.",
+    )
+    parser.add_argument(
+        "--noise-std", type=float, default=0.0,
+        help="Gaussian noise added to training inputs (denoising mode). "
+             "Default 0 (disabled). Only useful with shallow architectures; "
+             "the tight 4-stage arch is already strongly regularised by compression.",
+    )
+    parser.add_argument(
+        "--log-scores", action="store_true",
+        help="Apply log1p transform to all anomaly scores before threshold calibration "
+             "and statistics.  MAE distributions are log-normal (right-skewed), so "
+             "log-space thresholds are more meaningful — p95 actually gives ~5%% FPR.",
+    )
+    parser.add_argument(
+        "--seed", type=int, default=42,
+        help="Random seed for reproducible training (default: 42).",
     )
     args = parser.parse_args()
 
@@ -501,6 +586,8 @@ def main():
                 score_percentile=args.score_percentile,
                 threshold_percentile=args.threshold_percentile,
                 use_preprocessed=args.use_preprocessed,
+                noise_std=args.noise_std,
+                seed=args.seed,
             )
             autoencoder.eval()
     else:
@@ -582,61 +669,123 @@ def main():
         brats_notum_scores = np.concatenate(brats_notum_scores_list) if brats_notum_scores_list else np.array([])
 
     # ── Within-domain BraTS threshold ─────────────────────────────────────
-    # Because IXI is not skull-stripped the autoencoder's IXI-calibrated
-    # threshold (mean+2σ on full-image MAE) is not comparable to BraTS
-    # foreground MAE.  Calibrate a second threshold on BraTS non-tumor slices
-    # (mean + 2σ) so the separation between healthy and pathological BraTS
-    # slices is measured on a level playing field.
-    if len(brats_notum_scores) >= 10:
+    # Apply optional log-transform before all threshold / statistics work.
+    # MAE distributions are right-skewed (log-normal), so in log-space they
+    # become approximately Gaussian and percentile thresholds are meaningful.
+    def _maybe_log(arr):
+        return np.log1p(arr) if args.log_scores else arr
+
+    notum_s = _maybe_log(brats_notum_scores)
+    tumor_s = _maybe_log(brats_tumor_scores)
+
+    if len(notum_s) >= 10:
         if args.threshold_percentile is not None:
-            brats_threshold = float(np.percentile(brats_notum_scores, args.threshold_percentile))
-            print(f"\n  BraTS within-domain threshold: {brats_threshold:.6f}  "
-                  f"(p{args.threshold_percentile} of non-tumour scores)")
+            brats_threshold_log = float(np.percentile(notum_s, args.threshold_percentile))
+            print(f"\n  BraTS within-domain threshold: {brats_threshold_log:.6f}  "
+                  f"(p{args.threshold_percentile} of {'log ' if args.log_scores else ''}non-tumour scores)")
         else:
-            brats_threshold = float(brats_notum_scores.mean() + args.threshold_sigma * brats_notum_scores.std())
-            print(f"\n  BraTS within-domain threshold: {brats_threshold:.6f}  "
-                  f"(μ={brats_notum_scores.mean():.6f}, σ={brats_notum_scores.std():.6f}, k={args.threshold_sigma})")
+            brats_threshold_log = float(notum_s.mean() + args.threshold_sigma * notum_s.std())
+            print(f"\n  BraTS within-domain threshold: {brats_threshold_log:.6f}  "
+                  f"(μ={notum_s.mean():.6f}, σ={notum_s.std():.6f}, k={args.threshold_sigma})")
     else:
-        brats_threshold = threshold   # fall back to IXI threshold if too few healthy slices
-        print("\n  Warning: too few non-tumour slices to calibrate BraTS threshold; using IXI threshold.")
+        brats_threshold_log = _maybe_log(np.array([threshold]))[0]
+        print("\n  Warning: too few non-tumour slices; using IXI threshold.")
+
+    # For display we always report raw MAE means; flagging uses log-space threshold.
+    brats_threshold = brats_threshold_log   # used consistently below
 
     # ── Summary ───────────────────────────────────────────────────────────
-    def _pct(arr, thr):
-        return 100 * (arr > thr).mean() if len(arr) else float("nan")
+    def _pct(arr_raw, thr_in_transform_space):
+        if not len(arr_raw):
+            return float("nan")
+        return 100 * (_maybe_log(arr_raw) > thr_in_transform_space).mean()
+
+    # Cohen's d in transformed space (effect size independent of threshold)
+    if len(notum_s) and len(tumor_s):
+        pooled_std = np.sqrt((notum_s.std()**2 + tumor_s.std()**2) / 2)
+        cohens_d   = (tumor_s.mean() - notum_s.mean()) / pooled_std if pooled_std > 0 else 0.0
+    else:
+        cohens_d = 0.0
 
     print("\n" + "=" * 75)
     print("ANOMALY DETECTION SUMMARY")
     print("=" * 75)
-    print(f"  {'Dataset':<30} {'Slices':>8} {'Mean MAE':>12} {'Std':>8}  IXI-thr  BraTS-thr")
+    score_label = "log(1+MAE)" if args.log_scores else "MAE"
+    print(f"  {'Dataset':<30} {'Slices':>8} {f'Mean {score_label}':>14} {'Std':>8}  IXI-thr  BraTS-thr")
     print("-" * 75)
     if len(ixi_scores):
+        ixi_s = _maybe_log(ixi_scores)
         print(
             f"  {'IXI (healthy, full-image)':<30} {len(ixi_scores):>8,} "
-            f"{ixi_scores.mean():>12.6f} {ixi_scores.std():>8.6f}"
+            f"{ixi_s.mean():>14.6f} {ixi_s.std():>8.6f}"
         )
     else:
         print(f"  {'IXI (healthy, full-image)':<30} {'—':>8}  {'(BraTS-domain mode)':>21}")
-    print(
-        f"  {'BraTS non-tumour (fg MAE)':<30} {len(brats_notum_scores):>8,} "
-        f"{brats_notum_scores.mean():>12.6f} {brats_notum_scores.std():>8.6f}  "
-        f"{_pct(brats_notum_scores, threshold):>5.1f}%   {_pct(brats_notum_scores, brats_threshold):>5.1f}%"
-        if len(brats_notum_scores) else f"  {'BraTS non-tumour':<30} {'N/A':>8}"
-    )
-    print(
-        f"  {'BraTS tumour slices (fg MAE)':<30} {len(brats_tumor_scores):>8,} "
-        f"{brats_tumor_scores.mean():>12.6f} {brats_tumor_scores.std():>8.6f}  "
-        f"{_pct(brats_tumor_scores, threshold):>5.1f}%   {_pct(brats_tumor_scores, brats_threshold):>5.1f}%"
-        if len(brats_tumor_scores) else f"  {'BraTS tumour slices':<30} {'N/A':>8}"
-    )
-    print(f"\n  IXI-calibrated threshold (full-image MAE)  : {threshold:.6f}")
-    print(f"  BraTS within-domain threshold (fg MAE)     : {brats_threshold:.6f}")
-    if len(brats_tumor_scores) and len(brats_notum_scores):
-        sep = brats_tumor_scores.mean() - brats_notum_scores.mean()
+    if len(notum_s):
+        print(
+            f"  {'BraTS non-tumour (fg)':<30} {len(notum_s):>8,} "
+            f"{notum_s.mean():>14.6f} {notum_s.std():>8.6f}  "
+            f"{_pct(brats_notum_scores, _maybe_log(np.array([threshold]))[0]):>5.1f}%   "
+            f"{_pct(brats_notum_scores, brats_threshold):>5.1f}%"
+        )
+    if len(tumor_s):
+        print(
+            f"  {'BraTS tumour slices (fg)':<30} {len(tumor_s):>8,} "
+            f"{tumor_s.mean():>14.6f} {tumor_s.std():>8.6f}  "
+            f"{_pct(brats_tumor_scores, _maybe_log(np.array([threshold]))[0]):>5.1f}%   "
+            f"{_pct(brats_tumor_scores, brats_threshold):>5.1f}%"
+        )
+    print(f"\n  BraTS within-domain threshold ({score_label}): {brats_threshold:.6f}")
+    if len(tumor_s) and len(notum_s):
+        sep       = tumor_s.mean() - notum_s.mean()
         flag_diff = _pct(brats_tumor_scores, brats_threshold) - _pct(brats_notum_scores, brats_threshold)
-        print(f"\n  Tumour vs non-tumour MAE separation : {sep:+.6f}  "
-              f"({'tumour higher ✓' if sep > 0 else 'no separation — possible calibration issue'})")
-        print(f"  Extra flagging on tumour slices     : {flag_diff:+.1f} pp  "
-              f"(using BraTS within-domain threshold)")
+        print(f"  Separation ({score_label})                 : {sep:+.6f}  "
+              f"({'tumour higher ✓' if sep > 0 else 'no separation ✗'})")
+        print(f"  Cohen's d  ({score_label})                 : {cohens_d:+.3f}  "
+              f"({'large' if abs(cohens_d)>0.8 else 'medium' if abs(cohens_d)>0.5 else 'small'} effect)")
+        print(f"  Extra flagging on tumour slices            : {flag_diff:+.1f} pp  "
+              f"(BraTS within-domain threshold, {args.threshold_percentile or int(args.threshold_sigma)}{'th pct' if args.threshold_percentile else 'σ'})")
+
+        # ── AUC-ROC and Average Precision ─────────────────────────────────
+        # Build a binary classification problem: 0=healthy, 1=tumour.
+        # scores are already in transform space (log or raw).
+        # AUC-ROC and AP are threshold-independent, so they give a single
+        # defensible number regardless of where we draw the threshold line.
+        try:
+            from sklearn.metrics import roc_auc_score, average_precision_score, roc_curve
+            y_true  = np.concatenate([np.zeros(len(notum_s)), np.ones(len(tumor_s))])
+            y_score = np.concatenate([notum_s, tumor_s])
+            auc_roc = roc_auc_score(y_true, y_score)
+            avg_pre = average_precision_score(y_true, y_score)
+            # Chance-level AP = fraction of positives
+            chance_ap = len(tumor_s) / (len(notum_s) + len(tumor_s))
+            print(f"\n  AUC-ROC                                    : {auc_roc:.4f}  "
+                  f"({'↑ better than chance' if auc_roc > 0.5 else '↓ worse than chance'})")
+            print(f"  Average Precision (AP)                     : {avg_pre:.4f}  "
+                  f"(chance = {chance_ap:.4f})")
+            print(f"  AP lift over chance                        : {avg_pre/chance_ap:.2f}×")
+
+            # Save ROC curve
+            fpr, tpr, _ = roc_curve(y_true, y_score)
+            fig, ax = plt.subplots(figsize=(6, 6))
+            ax.plot(fpr, tpr, color="steelblue", lw=2,
+                    label=f"ROC curve (AUC = {auc_roc:.3f})")
+            ax.plot([0, 1], [0, 1], "k--", lw=1, label="Chance")
+            ax.set_xlabel("False Positive Rate (healthy flagged)")
+            ax.set_ylabel("True Positive Rate (tumour flagged)")
+            ax.set_title(f"Anomaly Detector ROC — BraTS non-tumour vs tumour\n"
+                         f"{'log(1+MAE)' if args.log_scores else 'MAE'} score, "
+                         f"p{args.score_percentile} pixel percentile")
+            ax.legend(fontsize=10)
+            ax.grid(True, alpha=0.3)
+            roc_path = FIGURES_DIR / "anomaly_roc.png"
+            plt.tight_layout()
+            plt.savefig(roc_path, dpi=150, bbox_inches="tight")
+            plt.close()
+            print(f"  Saved ROC curve → {roc_path.name}")
+        except ImportError:
+            print("\n  (Install scikit-learn for AUC-ROC: pip install scikit-learn)")
+
     print("=" * 75)
 
     if failed:

@@ -43,6 +43,15 @@ EXPLAINABILITY_DIR = ROOT_DIR / "outputs" / "explainability" # Grad-CAM, IG, ada
 LOGS_DIR = ROOT_DIR / "logs"
 
 # ---------------------------------------------------------------------------
+# BraTS2020 reconstruction  (src/preprocess_brats.py, src/train.py)
+# ---------------------------------------------------------------------------
+
+BRATS_DIR          = ROOT_DIR / "data" / "brats"
+BRATS_INPUTS_PATH  = PROCESSED_DIR / "brats_inputs.npy"   # (N, 2, 256, 256)
+BRATS_TARGETS_PATH = PROCESSED_DIR / "brats_targets.npy"  # (N, 256, 256)
+BRATS_MODEL_PATH   = MODELS_DIR / "unet_brats_best.pth"
+
+# ---------------------------------------------------------------------------
 # Preprocessing  (src/preprocess.py)
 # ---------------------------------------------------------------------------
 
@@ -119,64 +128,11 @@ OUT_CHANNELS = 1
 
 # Number of samples analysed by the explainability and adaptive decision
 # modules.  Indices are spread uniformly across the full dataset via linspace.
-N_EXPL_SAMPLES = 6
+N_EXPL_SAMPLES = 50
 
 # Number of interpolation steps for Integrated Gradients.  Higher values give
 # more accurate attribution but scale linearly in compute time.  50 provides
 # a good accuracy / speed trade-off for 256×256 inputs.
 IG_STEPS = 50
 
-# ---------------------------------------------------------------------------
-# Adaptive Decision  (src/adaptive_decision.py)
-# ---------------------------------------------------------------------------
 
-# Number of stochastic forward passes used to estimate prediction variance.
-# More passes → more stable uncertainty estimate, but proportionally slower.
-MC_DROPOUT_PASSES = 10
-
-# Dropout probability applied to the bottleneck feature map during each MC
-# pass.  0.1 gives measurable variance without collapsing predictions;
-# higher values increase variance range but degrade mean reconstruction quality.
-MC_DROPOUT_P = 0.1
-
-# Global uncertainty score (mean pixel variance) above which the module
-# recommends full acquisition instead of relying on the reconstruction.
-# This value is heuristic — it should be calibrated on a validation set
-# with known-difficult cases if used in a real clinical pipeline.
-UNCERTAINTY_THRESHOLD = 0.01
-
-# ---------------------------------------------------------------------------
-# Anomaly detection / Phase 2  (src/adaptive_decision.py)
-# ---------------------------------------------------------------------------
-
-# Path to the trained SliceAutoencoder weights produced by
-# train_anomaly_detector().  Reused on subsequent runs to skip retraining.
-ANOMALY_DETECTOR_PATH = MODELS_DIR / "anomaly_detector.pth"
-
-# Path to the .npy scalar file that stores the calibrated anomaly threshold
-# (mean + 2σ of training-set MAE).  Written alongside the model weights.
-ANOMALY_THRESHOLD_PATH = MODELS_DIR / "anomaly_threshold.npy"
-
-# Number of epochs to train the SliceAutoencoder on healthy MRI slices.
-# 10 epochs converges on the IXI dataset; increase if training loss plateaus.
-ANOMALY_EPOCHS = 10
-
-# Fallback anomaly threshold used when ANOMALY_THRESHOLD_PATH does not yet
-# exist (i.e. before train_anomaly_detector() has been run).
-ANOMALY_DEFAULT_THRESHOLD = 0.05
-
-# ---------------------------------------------------------------------------
-# BraTS2020  (src/preprocess_brats.py, src/evaluate_brats.py)
-# ---------------------------------------------------------------------------
-
-# Raw BraTS2020 per-slice H5 files.
-BRATS_DIR = ROOT_DIR / "data" / "brats"
-
-# Preprocessed numpy outputs from preprocess_brats.py.
-# Suffix _ch{N} lets different modality channels coexist on disk.
-BRATS_HEALTHY_PATH = PROCESSED_DIR / "brats_healthy.npy"   # non-tumour slices (S, 256, 256)
-BRATS_TUMOR_PATH   = PROCESSED_DIR / "brats_tumor.npy"     # tumour slices     (S, 256, 256)
-
-# BraTS-domain anomaly detector (trained on BRATS_HEALTHY_PATH slices).
-BRATS_DETECTOR_PATH  = MODELS_DIR / "anomaly_detector_brats.pth"
-BRATS_THRESHOLD_PATH = MODELS_DIR / "anomaly_threshold_brats.npy"
