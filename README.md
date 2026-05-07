@@ -1,6 +1,6 @@
 # MRI Slice Interpolation with Deep Learning
 
-> **The one-line pitch:** MRI scanners are slow. What if you acquired only half the data and used a neural network to reconstruct the rest — and then had the AI itself decide whether its reconstruction was good enough to trust?
+> **The one-line pitch:** MRI scanners are slow. What if you acquired only half the data and used a neural network to reconstruct the missing slices — and could prove it works, understood why it works, and tested it on two different brain MRI datasets?
 
 ---
 
@@ -8,7 +8,7 @@
 
 A full brain MRI scan acquires hundreds of image slices, one at a time. This takes time — and in clinical settings, **scan time directly affects patient comfort, scanner availability, and cost**.
 
-One way to speed things up is to skip every other slice during acquisition. You end up with half the data in half the time. The challenge: can you recover the missing slices well enough that a doctor wouldn't know the difference?
+One way to speed things up is to skip every other slice during acquisition. You end up with half the data in half the time. The challenge: can you recover the missing slices well enough that a doctor wouldn’t know the difference?
 
 ---
 
@@ -31,39 +31,48 @@ Given two neighboring acquired slices, the model learns to predict the missing o
 
 ## What Was Built
 
-The project has four modules, each doing one thing:
+Three pipeline stages plus an ablation study:
 
 ```
-src/preprocess.py        Load 581 brain MRI scans → build training pairs → compute baselines
+src/preprocess.py         IXI NIfTI scans → resize → normalise → 2.5D pairs + baselines
+src/preprocess_brats.py   BraTS2020 H5 slices → 2.5D reconstruction pairs
          ↓
-src/train.py             Define + train a U-Net → evaluate on test set → save best model
+src/train.py              U-Net + PlainCNN (ablation), --model unet|plaincnn,
+                          --data ixi|brats, evaluation: PSNR / SSIM / MAE / FG-MAE
          ↓
-src/explainability.py    Grad-CAM + Integrated Gradients → understand what the model looks at
-         ↓
-src/adaptive_decision.py Monte Carlo Dropout → estimate uncertainty → decide: trust it or rescan
+src/explainability.py     Grad-CAM + Integrated Gradients + Slice Contribution +
+                          Occlusion Sensitivity + MC Uncertainty (50 samples)
 ```
 
-All configuration (paths, hyperparameters, thresholds) lives in one place: `src/config.py`.
+All configuration (paths, hyperparameters) lives in one place: `src/config.py`.
 
 ---
 
-## Dataset
+## Datasets
 
-**IXI Brain Dataset** — 581 T1-weighted MRI volumes from 3 London hospitals  
-(Guy's, Hammersmith, IOP). Publicly available, healthy subjects only.
+### IXI Brain Dataset (primary)
+581 T1-weighted MRI volumes from 3 London hospitals (Guy’s, Hammersmith, IOP).
+Publicly available, healthy subjects only.
 
-Each volume was:
-- Resized to 256 × 256 pixels per slice
-- Normalised to [0, 1] intensity range
-- Split into 2.5D input–target pairs (every other slice skipped)
+- Resized to 256 × 256 per slice, normalised to [0, 1]
+- 2.5D input–target pairs (every other slice skipped, ×2 acceleration)
+- **42,816 total pairs** — split 70 / 15 / 15 (train / val / test)
 
-This produced **42,816 training pairs** in total.
+### BraTS2020 (cross-dataset validation)
+57,195 pre-extracted H5 slices, T1 channel, skull-stripped.
+
+- Same 2.5D pipeline and preprocessing as IXI
+- **28,413 reconstruction pairs**
+- Skull-stripped backgrounds (~70–80 % zeros) inflate raw PSNR, so results are
+  reported as **FG-MAE** (foreground MAE, pixels where ground truth > 0.02)
 
 ---
 
 ## The Model — U-Net
 
-A U-Net is an encoder–decoder network with skip connections. It was originally designed for medical image segmentation and works extremely well for any task that needs to produce a full-resolution image from another full-resolution image.
+A U-Net is an encoder–decoder network with skip connections. Originally designed for
+medical image segmentation, it excels at any task that produces a full-resolution image
+from another full-resolution image.
 
 ```
 Input: [left_slice, right_slice]   (2 × 256 × 256)
@@ -72,7 +81,7 @@ Input: [left_slice, right_slice]   (2 × 256 × 256)
     │  Encoder  │   32 → 64 → 128 → 256 channels
     │           │   each level: 2× Conv + BN + ReLU → MaxPool
     └─────┬─────┘
-          │  skip connections (fine detail preserved here)
+          │  skip connections (fine spatial detail preserved)
     ┌─────▼─────┐
     │ Bottleneck│   512 channels, 16 × 16 spatial resolution
     └─────┬─────┘
@@ -85,73 +94,93 @@ Input: [left_slice, right_slice]   (2 × 256 × 256)
 Output: predicted missing slice    (1 × 256 × 256)
 ```
 
-**7.76 million parameters.** Trained for 20 epochs on an RTX 4090 GPU (UBELIX HPC).  
-Loss = `0.8 × L1  +  0.2 × (1 − SSIM)` — a blend of pixel accuracy and structural similarity.
+**7.76 million parameters.** Trained for 20 epochs on an RTX 5070 Ti.
+Loss = `0.8 × L1  +  0.2 × (1 − SSIM)` — pixel accuracy blended with structural similarity.
 
 ---
 
-## Results
+## Ablation — Skip Connections Are the Key Ingredient
 
-Compared against two classical baselines on 6,422 held-out test pairs:
+A **PlainCNN** was trained as a controlled ablation: identical to the U-Net but with all
+skip connections removed. This isolates their contribution.
 
-| Method              | PSNR (dB)          | SSIM               | MAE      |
-|---------------------|--------------------|--------------------|----------|
-| Linear interpolation| 33.21              | 0.9066             | —        |
-| Cubic spline        | 33.19              | 0.9048             | —        |
-| **U-Net (ours)**    | **35.95 ± 6.54**   | **0.9455 ± 0.0294**| 0.00939  |
+| Method                   | PSNR (dB)        | SSIM               | MAE      |
+|--------------------------|------------------|--------------------|----------|
+| Cubic spline             | 33.19            | 0.9048             | —        |
+| Linear interpolation     | 33.21            | 0.9066             | —        |
+| **PlainCNN (no skips)**  | 33.06            | —                  | —        |
+| **U-Net (ours)**         | **36.07 ± 6.5**  | **0.9461 ± 0.029** | 0.00932  |
 
-**+2.74 dB PSNR and +0.039 SSIM** over the best classical method.
+Key findings:
 
-> **Reading PSNR:** above 35 dB means the difference between original and reconstructed is barely visible to the human eye. Above 40 dB is essentially perfect.
+- PlainCNN (33.06 dB) is **worse than linear interpolation** (33.21 dB) — a deep
+  network without skip connections cannot beat a classical baseline on this task.
+- The U-Net is **+2.86 dB over linear** and **+3.01 dB over PlainCNN**, proving skip
+  connections are the essential architectural ingredient.
 
-> **Reading SSIM:** 1.0 is identical. 0.94 means structural features (edges, shapes) are very well preserved.
-
----
-
-## Explainability — What Does the Model Actually Look At?
-
-Two techniques were used to peer inside the model:
-
-### Grad-CAM (where does it look?)
-Produces a heat map over the image showing which spatial regions had the most influence on the reconstruction.
-
-- **Hard cases** (low PSNR): attention is widespread — the model is uncertain and casts a wide net.
-- **Medium cases**: attention focuses on skull boundary and tissue edges — the model uses structural anchors.
-- **Easy cases** (boundary/background slices): almost no activation — the slices are so similar the model barely needs to look at anything.
-
-### Integrated Gradients (which input pixels matter?)
-Attributes each pixel of the two input slices to the final output. Key finding:
-
-- **Left/right attribution ratio ≈ 0.95** — the model treats both neighboring slices almost equally, which is exactly what you'd want from an interpolation model. If this were 0.3 or 2.0, it would mean the model was nearly ignoring one of its inputs.
+> **Reading PSNR:** above 35 dB means differences are barely visible to the human eye.
+> Above 40 dB is essentially indistinguishable from the original.
 
 ---
 
-## Adaptive Acquisition — Should We Even Trust the Reconstruction?
+## Cross-Dataset Results — BraTS2020
 
-This is the most novel part. Instead of always accepting the U-Net's output, the system first asks: *"How confident is the model in this reconstruction?"*
+| Method            | PSNR (dB) | FG-MAE  | Note                                       |
+|-------------------|-----------|---------|--------------------------------------------|
+| **U-Net (BraTS)** | 58.65     | 0.00754 | Raw PSNR inflated by skull-strip zeros     |
 
-**Technique: Monte Carlo Dropout**
+FG-MAE of **0.00754** on tissue voxels confirms the model generalises to a structurally
+different dataset (tumour-bearing, skull-stripped) without any architectural changes.
 
-During normal inference, neural networks give one deterministic answer. By randomly switching off 10% of the bottleneck neurons and running 10 forward passes, each pass gives a slightly different result. The **variance across those 10 predictions** is used as an uncertainty score.
+---
 
-```
-10 stochastic passes
-    → pixel-wise variance map
-        → global uncertainty score (mean variance)
-            → compare to threshold
-                → SAFE: use the reconstruction
-                  UNSAFE: acquire the missing slices for real
-```
+## Explainability — What Does the Model Look At?
 
-**Decision rule:**
-```
-if uncertainty < 0.01:
-    "Decision: SAFE — reconstruction applied"
-else:
-    "Decision: UNSAFE — full acquisition recommended"
-```
+Four complementary techniques were applied across **50 uniformly sampled test cases**.
 
-This turns a passive reconstruction model into an **active safety gate** — the AI decides when to trust itself and when to step aside.
+### Grad-CAM (spatial attention)
+Heat map showing which image regions drove the reconstruction output.
+
+- **Hard samples** (low PSNR): diffuse, widespread activation — model is uncertain.
+- **Medium samples**: attention concentrated on skull boundary and tissue edges.
+- **Easy samples**: near-zero activation — neighboring slices are already near-identical.
+
+### Integrated Gradients (input attribution)
+Attributes each input pixel’s contribution along a baseline–input path.
+
+| Metric                  | Value  | Interpretation                         |
+|-------------------------|--------|----------------------------------------|
+| Mean IG — Left slice   | 9.20e-07 | Both channels contribute equally     |
+| Mean IG — Right slice  | 9.11e-07 |                                      |
+| **Left/Right IG ratio** | **1.0093** | Near-perfect symmetry (1.0 = ideal) |
+
+### Slice Contribution (channel ablation)
+Zeros out each input channel in turn; measures the resulting output change.
+
+| Metric                         | Value          |
+|--------------------------------|----------------|
+| Contribution — Left            | 0.0808 ± 0.049  |
+| Contribution — Right           | 0.0763 ± 0.046  |
+| Left/Right contribution ratio  | 1.059          |
+
+High absolute values (vs. occlusion below) confirm the model integrates **global** slice
+structure rather than attending to any local region.
+
+### Occlusion Sensitivity (16 × 16 patch occlusion)
+Slides a zeroed patch over the input; measures output sensitivity.
+
+| Metric                        | Value          |
+|-------------------------------|----------------|
+| Sensitivity — Left            | 0.0003 ± 0.0002 |
+| Sensitivity — Right           | 0.0003 ± 0.0002 |
+| Left/Right occlusion ratio    | 1.028          |
+
+No single patch dominates — information is distributed globally across both slices.
+
+### MC Uncertainty (bottleneck dropout, 20 passes)
+| Metric                   | Value    | Interpretation                           |
+|--------------------------|----------|------------------------------------------|
+| Mean variance            | 7.44e-16 | Effectively zero — model is very confident |
 
 ---
 
@@ -159,24 +188,26 @@ This turns a passive reconstruction model into an **active safety gate** — the
 
 ```
 Project/
-├── documentation/              # conceptual docs and extension notes
+├── Documentation/              # extended design notes
 ├── src/
 │   ├── config.py               # single source of truth: all paths + hyperparameters
-│   ├── preprocess.py           # load NIfTI → resize → normalise → build pairs → baselines
-│   ├── train.py                # U-Net + loss + training loop + evaluation
-│   ├── explainability.py       # Grad-CAM and Integrated Gradients
-│   └── adaptive_decision.py    # Monte Carlo Dropout + uncertainty + safety decision
+│   ├── preprocess.py           # IXI NIfTI → resize → normalise → 2.5D pairs + baselines
+│   ├── preprocess_brats.py     # BraTS2020 H5 → 2.5D reconstruction pairs
+│   ├── train.py                # U-Net + PlainCNN, --model and --data flags, evaluation
+│   └── explainability.py       # Grad-CAM, IG, slice contribution, occlusion, MC uncertainty
 ├── data/
-│   ├── raw/                    # put your .nii / .nii.gz files here
-│   └── processed/              # generated arrays (dataset_inputs.npy, dataset_targets.npy)
-├── models/                     # unet_best.pth saved here during training
+│   ├── raw/                    # put IXI .nii / .nii.gz files here
+│   ├── brats/                  # put BraTS2020 H5 files here
+│   └── processed/              # generated .npy arrays (git-ignored)
+├── models/                     # unet_best.pth, unet_brats_best.pth (git-ignored)
 ├── outputs/
-│   ├── figures/                # training curves, prediction grids, metric histograms
-│   ├── metrics/                # .npy arrays of PSNR / SSIM / MAE per sample
-│   └── explainability/         # Grad-CAM maps, IG maps, adaptive decision panels
-├── logs/                       # SLURM job output (HPC only)
+│   ├── figures/                # training curves, prediction grids
+│   ├── metrics/                # per-sample PSNR / SSIM / MAE arrays
+│   └── explainability/         # per-sample PNG figures + summary_stats.txt
+├── notebooks/                  # exploratory Jupyter notebooks
+├── logs/                       # SLURM job logs (HPC only)
 ├── requirements.txt
-├── job_run_gpu.sh              # submit all 4 steps to UBELIX in one go
+├── job_run_gpu.sh              # UBELIX HPC submission script
 └── README.md
 ```
 
@@ -188,29 +219,37 @@ Project/
 pip install -r requirements.txt
 ```
 
-Requirements: `torch`, `torchvision`, `pytorch-msssim`, `nibabel`, `numpy`, `scipy`, `scikit-image`, `matplotlib`, `opencv-python`.
+Requirements: `torch`, `torchvision`, `pytorch-msssim`, `nibabel`, `numpy`, `scipy`,
+`scikit-image`, `matplotlib`, `h5py`.
 
 ---
 
 ## Running
 
-Run each step from the **project root folder**. They must run in order — each step depends on the output of the previous one.
+All commands run from the **project root**. Steps 1a and 1b are independent;
+steps 2–3 depend on step 1.
 
 ```bash
-# Step 1 — preprocess raw scans (takes a while for 581 volumes)
+# Step 1a — preprocess IXI scans (~581 volumes, takes several minutes)
 python -m src.preprocess
 
-# Step 2 — train the U-Net (~20 epochs on GPU)
-python -m src.train
+# Step 1b — preprocess BraTS2020 (optional, for cross-dataset validation)
+python -m src.preprocess_brats
 
-# Step 3 — generate Grad-CAM and IG visualisations
+# Step 2 — train U-Net on IXI
+python -m src.train --model unet --data ixi
+
+# Step 2b — ablation: PlainCNN without skip connections
+python -m src.train --model plaincnn --data ixi
+
+# Step 2c — train U-Net on BraTS
+python -m src.train --model unet --data brats
+
+# Step 3 — generate all explainability outputs (50 samples, ~15–30 min on GPU)
 python -m src.explainability
-
-# Step 4 — run adaptive uncertainty analysis
-python -m src.adaptive_decision
 ```
 
-### On UBELIX HPC (all 4 steps in one job)
+### On UBELIX HPC
 
 ```bash
 sbatch job_run_gpu.sh
@@ -222,18 +261,18 @@ Logs → `logs/<jobname>_<jobid>.out` and `.err`
 
 ## Configuration
 
-Every number that matters lives in [src/config.py](src/config.py). To change anything, edit only that file.
+Every number that matters lives in [src/config.py](src/config.py).
 
-| Parameter              | Default            | What it controls                                   |
-|------------------------|--------------------|----------------------------------------------------|
-| `ACCELERATION_FACTOR`  | `2`                | How many slices are skipped (2 = every other one)  |
-| `TARGET_SIZE`          | `(256, 256)`       | Pixel resolution of each slice                     |
-| `BATCH_SIZE`           | `8`                | Samples per gradient step                          |
-| `NUM_EPOCHS`           | `20`               | Training epochs                                    |
-| `LEARNING_RATE`        | `1e-3`             | Adam initial step size                             |
-| `LOSS_ALPHA`           | `0.8`              | L1 vs SSIM weight in the loss (0 = all SSIM)       |
-| `UNET_FEATURES`        | `[32, 64, 128, 256]` | Channel counts across U-Net encoder levels       |
-| `N_EXPL_SAMPLES`       | `6`                | How many samples to analyse in explainability      |
-| `MC_DROPOUT_PASSES`    | `10`               | Forward passes per sample for uncertainty estimate |
-| `MC_DROPOUT_P`         | `0.1`              | Dropout probability during MC passes               |
-| `UNCERTAINTY_THRESHOLD`| `0.01`             | Score above which full acquisition is recommended  |
+| Parameter              | Default                | What it controls                                   |
+|------------------------|------------------------|----------------------------------------------------|
+| `ACCELERATION_FACTOR`  | `2`                    | Slices skipped (2 = every other one, 50% missing)  |
+| `TARGET_SIZE`          | `(256, 256)`           | Pixel resolution of each slice                     |
+| `BATCH_SIZE`           | `8`                    | Samples per gradient step                          |
+| `NUM_EPOCHS`           | `20`                   | Maximum training epochs                            |
+| `LEARNING_RATE`        | `1e-3`                 | Adam initial learning rate                         |
+| `LOSS_ALPHA`           | `0.8`                  | L1 vs SSIM blend (0.8 = 80 % L1, 20 % SSIM)       |
+| `UNET_FEATURES`        | `[32, 64, 128, 256]`   | Channel counts across U-Net encoder levels         |
+| `N_EXPL_SAMPLES`       | `50`                   | Samples analysed by explainability                 |
+| `IG_STEPS`             | `50`                   | Integrated Gradients path steps                    |
+| `MC_DROPOUT_PASSES`    | `10`                   | Forward passes per sample for MC uncertainty       |
+| `MC_DROPOUT_P`         | `0.3`                  | Dropout probability during MC passes               |
