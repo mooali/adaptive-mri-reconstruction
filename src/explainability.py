@@ -64,8 +64,60 @@ from src.config import (
     EXPLAINABILITY_DIR,
     N_EXPL_SAMPLES,
     IG_STEPS,
+    MC_DROPOUT_PASSES,
+    MC_DROPOUT_P,
 )
 from src.train import UNet   # reuse the exact same architecture as was trained
+
+
+# ---------------------------------------------------------------------------
+# MC Dropout helpers (for uncertainty estimation)
+# ---------------------------------------------------------------------------
+
+def enable_mc_dropout(model, p=MC_DROPOUT_P):
+    """Attach a forward hook to the bottleneck that applies dropout at inference."""
+    def _dropout_hook(module, input, output):
+        return F.dropout(output, p=p, training=True)
+    return model.bottleneck.register_forward_hook(_dropout_hook)
+
+
+def mc_forward_passes(model, x, device, n_passes=MC_DROPOUT_PASSES, dropout_p=MC_DROPOUT_P):
+    """
+    Run n_passes stochastic forward passes through the model.
+
+    Returns
+    -------
+    np.ndarray  shape (n_passes, H, W)
+    """
+    model.eval()
+    handle = enable_mc_dropout(model, p=dropout_p)
+    preds = []
+    with torch.no_grad():
+        for _ in range(n_passes):
+            pred = model(x.to(device)).squeeze().cpu().numpy()
+            preds.append(pred)
+    handle.remove()
+    return np.stack(preds, axis=0)
+
+
+def summarise_uncertainty(predictions):
+    """
+    Summarise MC predictions into mean, variance map, and global score.
+
+    Parameters
+    ----------
+    predictions : np.ndarray  shape (n_passes, H, W)
+
+    Returns
+    -------
+    mean_pred       : np.ndarray  (H, W)
+    uncertainty_map : np.ndarray  (H, W)  per-pixel variance
+    global_score    : float  mean variance across all pixels
+    """
+    mean_pred       = predictions.mean(axis=0)
+    uncertainty_map = predictions.var(axis=0)
+    global_score    = float(uncertainty_map.mean())
+    return mean_pred, uncertainty_map, global_score
 
 
 # ---------------------------------------------------------------------------
@@ -267,6 +319,97 @@ def get_sample(inputs, targets, idx, device):
 
 
 # ---------------------------------------------------------------------------
+# Slice contribution and occlusion sensitivity
+# ---------------------------------------------------------------------------
+
+def compute_slice_contribution(model, x, device):
+    """
+    Channel ablation: measure each input slice's contribution to the prediction.
+
+    Zeroes out each channel in turn and computes the change in output relative
+    to the full prediction.  A larger change means that channel was more important.
+
+    Returns
+    -------
+    left_contrib_map  : np.ndarray  (H, W)  |pred_full - pred_no_left|
+    right_contrib_map : np.ndarray  (H, W)  |pred_full - pred_no_right|
+    dominance_map     : np.ndarray  (H, W)  left_contrib - right_contrib
+    left_score        : float  mean left contribution
+    right_score       : float  mean right contribution
+    """
+    model.eval()
+    x = x.to(device)
+    with torch.no_grad():
+        pred_full = model(x).squeeze().cpu().numpy()
+
+        x_no_left = x.clone()
+        x_no_left[:, 0] = 0.0
+        pred_no_left = model(x_no_left).squeeze().cpu().numpy()
+
+        x_no_right = x.clone()
+        x_no_right[:, 1] = 0.0
+        pred_no_right = model(x_no_right).squeeze().cpu().numpy()
+
+    left_contrib_map  = np.abs(pred_full - pred_no_left)
+    right_contrib_map = np.abs(pred_full - pred_no_right)
+    dominance_map     = left_contrib_map - right_contrib_map
+    left_score        = float(left_contrib_map.mean())
+    right_score       = float(right_contrib_map.mean())
+    return left_contrib_map, right_contrib_map, dominance_map, left_score, right_score
+
+
+def compute_occlusion_sensitivity(model, x, device, patch_size=16, stride=16, fill_value=0.0):
+    """
+    Slide a zeroed patch over each input channel and measure output change.
+
+    Parameters
+    ----------
+    patch_size : int  patch height and width (default 16 for speed)
+    stride     : int  step between patches (default 16 = non-overlapping)
+    fill_value : float  value to fill the occluded region
+
+    Returns
+    -------
+    left_occ_map  : np.ndarray  (H, W)  sensitivity of output to left channel patches
+    right_occ_map : np.ndarray  (H, W)  sensitivity of output to right channel patches
+    left_score    : float  mean left occlusion sensitivity
+    right_score   : float  mean right occlusion sensitivity
+    """
+    model.eval()
+    x = x.to(device)
+    H, W = x.shape[2], x.shape[3]
+
+    with torch.no_grad():
+        base_pred = model(x).squeeze().cpu().numpy()
+
+    left_occ_map  = np.zeros((H, W), dtype=np.float32)
+    right_occ_map = np.zeros((H, W), dtype=np.float32)
+    count_map     = np.zeros((H, W), dtype=np.float32)
+
+    with torch.no_grad():
+        for y in range(0, H - patch_size + 1, stride):
+            for xp in range(0, W - patch_size + 1, stride):
+                x_occ = x.clone()
+                x_occ[:, 0, y:y + patch_size, xp:xp + patch_size] = fill_value
+                diff_left = float(np.abs(base_pred - model(x_occ).squeeze().cpu().numpy()).mean())
+                left_occ_map[y:y + patch_size, xp:xp + patch_size] += diff_left
+
+                x_occ = x.clone()
+                x_occ[:, 1, y:y + patch_size, xp:xp + patch_size] = fill_value
+                diff_right = float(np.abs(base_pred - model(x_occ).squeeze().cpu().numpy()).mean())
+                right_occ_map[y:y + patch_size, xp:xp + patch_size] += diff_right
+
+                count_map[y:y + patch_size, xp:xp + patch_size] += 1
+
+    count_map = np.maximum(count_map, 1)
+    left_occ_map  /= count_map
+    right_occ_map /= count_map
+    left_score  = float(left_occ_map.mean())
+    right_score = float(right_occ_map.mean())
+    return left_occ_map, right_occ_map, left_score, right_score
+
+
+# ---------------------------------------------------------------------------
 # Per-sample explainability figure
 # ---------------------------------------------------------------------------
 
@@ -354,6 +497,70 @@ def visualize_explainability(model, gradcam, inputs, targets, sample_idx, device
     plt.tight_layout()
     if save_dir:
         path = save_dir / f"explainability_sample_{sample_idx}.png"
+        plt.savefig(path, dpi=150, bbox_inches="tight")
+        print(f"Saved: {path}")
+    plt.close()
+
+
+# ---------------------------------------------------------------------------
+# Dependency maps figure (slice contribution + occlusion)
+# ---------------------------------------------------------------------------
+
+def visualize_dependency_maps(model, inputs, targets, sample_idx, device, save_dir=None):
+    """
+    Produce a 2x3 figure showing slice contribution maps and occlusion sensitivity.
+
+    Panel layout (2 rows x 3 columns)
+    ----------------------------------
+    Row 0: Left Contribution | Right Contribution | Dominance Map
+    Row 1: Left Occlusion    | Right Occlusion    | Occlusion Difference
+
+    Parameters
+    ----------
+    model      : UNet
+    inputs     : np.memmap
+    targets    : np.memmap
+    sample_idx : int
+    device     : torch.device
+    save_dir   : Path or None
+    """
+    x, _, _ = get_sample(inputs, targets, sample_idx, device)
+
+    left_contrib, right_contrib, dominance, left_cs, right_cs = \
+        compute_slice_contribution(model, x.clone(), device)
+    left_occ, right_occ, left_os, right_os = \
+        compute_occlusion_sensitivity(model, x.clone(), device)
+
+    occ_diff = left_occ - right_occ
+
+    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+    fig.suptitle(
+        f"Dependency Maps \u2014 Sample {sample_idx}\n"
+        f"Contribution L/R={left_cs:.4f}/{right_cs:.4f}   "
+        f"Occlusion L/R={left_os:.4f}/{right_os:.4f}",
+        fontsize=13, fontweight="bold",
+    )
+
+    def _show(ax, img, cmap, title, vmin=None, vmax=None, diverging=False):
+        if diverging and img.min() < 0 < img.max():
+            norm = TwoSlopeNorm(vmin=img.min(), vcenter=0, vmax=img.max())
+            im = ax.imshow(img, cmap=cmap, norm=norm)
+        else:
+            im = ax.imshow(img, cmap=cmap, vmin=vmin, vmax=vmax)
+        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        ax.set_title(title, fontsize=11, fontweight="bold")
+        ax.axis("off")
+
+    _show(axes[0, 0], left_contrib,  "hot",    f"Left Slice Contribution\n(mean={left_cs:.4f})",   0, left_contrib.max())
+    _show(axes[0, 1], right_contrib, "hot",    f"Right Slice Contribution\n(mean={right_cs:.4f})", 0, right_contrib.max())
+    _show(axes[0, 2], dominance,     "RdBu_r", "Dominance Map\n(+red=left, \u2212blue=right)",       diverging=True)
+    _show(axes[1, 0], left_occ,      "viridis", f"Left Occlusion Sensitivity\n(mean={left_os:.4f})",  0, left_occ.max())
+    _show(axes[1, 1], right_occ,     "viridis", f"Right Occlusion Sensitivity\n(mean={right_os:.4f})", 0, right_occ.max())
+    _show(axes[1, 2], occ_diff,      "RdBu_r", "Occlusion Difference\n(+red=left, \u2212blue=right)",  diverging=True)
+
+    plt.tight_layout()
+    if save_dir:
+        path = save_dir / f"dependency_maps_sample_{sample_idx}.png"
         plt.savefig(path, dpi=150, bbox_inches="tight")
         print(f"Saved: {path}")
     plt.close()
@@ -458,12 +665,10 @@ def compare_easy_vs_hard(model, gradcam, inputs, targets, device, n_each=3, save
 
 def print_attribution_stats(model, gradcam, inputs, targets, sample_idxs, device):
     """
-    Print summary statistics for IG and Grad-CAM across multiple samples.
+    Print and save extended summary statistics across multiple samples.
 
-    Key metric: left/right attribution ratio.  A value near 1.0 means the
-    model treats both input slices symmetrically, which is the expected
-    behaviour for a learned interpolation model.  Values far from 1.0 would
-    suggest the model is ignoring one of its two inputs.
+    Covers: IG attribution, Grad-CAM, MC uncertainty, slice contribution,
+    and occlusion sensitivity ratios.
 
     Parameters
     ----------
@@ -471,27 +676,64 @@ def print_attribution_stats(model, gradcam, inputs, targets, sample_idxs, device
     gradcam     : GradCAM
     inputs      : np.memmap
     targets     : np.memmap
-    sample_idxs : array-like  ÔÇö indices to include in the summary
+    sample_idxs : array-like
     device      : torch.device
     """
     mean_left, mean_right, mean_cam = [], [], []
+    unc_scores = []
+    left_cs_list, right_cs_list = [], []
+    left_os_list, right_os_list = [], []
 
     for idx in sample_idxs:
         x, _, _ = get_sample(inputs, targets, idx, device)
-        attrs   = compute_integrated_gradients(model, x.clone(), device)
-        cam     = gradcam.generate(x.clone())
+        attrs = compute_integrated_gradients(model, x.clone(), device)
+        cam   = gradcam.generate(x.clone())
         mean_left.append(attrs[0].mean())
         mean_right.append(attrs[1].mean())
         mean_cam.append(cam.mean())
 
-    print("\n========== EXPLAINABILITY SUMMARY ==========")
-    print(f"Mean IG ÔÇö Left slice  : {np.mean(mean_left):.2e} ┬▒ {np.std(mean_left):.2e}")
-    print(f"Mean IG ÔÇö Right slice : {np.mean(mean_right):.2e} ┬▒ {np.std(mean_right):.2e}")
-    print(f"Mean Grad-CAM         : {np.mean(mean_cam):.5f} ┬▒ {np.std(mean_cam):.5f}")
+        mc_preds = mc_forward_passes(model, x.clone(), device, n_passes=20)
+        _, _, unc = summarise_uncertainty(mc_preds)
+        unc_scores.append(unc)
 
-    # Avoid division by zero for degenerate cases.
-    ratio = np.mean(mean_left) / (np.mean(mean_right) + 1e-12)
-    print(f"\nLeft/Right IG ratio   : {ratio:.4f}  (1.0 = perfectly symmetric)")
+        _, _, _, left_cs, right_cs = compute_slice_contribution(model, x.clone(), device)
+        left_cs_list.append(left_cs)
+        right_cs_list.append(right_cs)
+
+        _, _, left_os, right_os = compute_occlusion_sensitivity(model, x.clone(), device)
+        left_os_list.append(left_os)
+        right_os_list.append(right_os)
+
+    ratio    = np.mean(mean_left)    / (np.mean(mean_right)    + 1e-12)
+    cs_ratio = np.mean(left_cs_list) / (np.mean(right_cs_list) + 1e-12)
+    os_ratio = np.mean(left_os_list) / (np.mean(right_os_list) + 1e-12)
+
+    lines = [
+        "========== EXPLAINABILITY SUMMARY ==========",
+        f"Mean IG — Left slice          : {np.mean(mean_left):.2e} ± {np.std(mean_left):.2e}",
+        f"Mean IG — Right slice         : {np.mean(mean_right):.2e} ± {np.std(mean_right):.2e}",
+        f"Mean Grad-CAM                 : {np.mean(mean_cam):.5f} ± {np.std(mean_cam):.5f}",
+        "",
+        f"Left/Right IG ratio           : {ratio:.4f}  (1.0 = perfectly symmetric)",
+        "",
+        f"MC Uncertainty (mean var)     : {np.mean(unc_scores):.2e} ± {np.std(unc_scores):.2e}",
+        "",
+        f"Slice contribution — Left     : {np.mean(left_cs_list):.4f} ± {np.std(left_cs_list):.4f}",
+        f"Slice contribution — Right    : {np.mean(right_cs_list):.4f} ± {np.std(right_cs_list):.4f}",
+        f"Left/Right contribution ratio  : {cs_ratio:.4f}",
+        "",
+        f"Occlusion sensitivity — Left  : {np.mean(left_os_list):.4f} ± {np.std(left_os_list):.4f}",
+        f"Occlusion sensitivity — Right : {np.mean(right_os_list):.4f} ± {np.std(right_os_list):.4f}",
+        f"Left/Right occlusion ratio     : {os_ratio:.4f}",
+    ]
+
+    for line in lines:
+        print(line)
+
+    stats_path = EXPLAINABILITY_DIR / "explainability_summary_stats.txt"
+    with open(stats_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    print(f"\nSummary saved to: {stats_path}")
 
 
 # ---------------------------------------------------------------------------
@@ -527,6 +769,10 @@ def main():
         print(f"  Processing sample {idx}...")
         visualize_explainability(
             model, gradcam, inputs, targets, int(idx), device,
+            save_dir=EXPLAINABILITY_DIR,
+        )
+        visualize_dependency_maps(
+            model, inputs, targets, int(idx), device,
             save_dir=EXPLAINABILITY_DIR,
         )
 

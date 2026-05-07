@@ -1,22 +1,16 @@
-========== EXPLAINABILITY SUMMARY STATS ==========
+========== EXPLAINABILITY SUMMARY ==========
+Mean IG — Left slice          : 9.20e-07 ± 5.30e-07
+Mean IG — Right slice         : 9.11e-07 ± 5.26e-07
+Mean Grad-CAM                 : 0.00858 ± 0.00581
 
-Integrated Gradients
-  Mean IG left        : 9.35e-07 ± 5.50e-07
-  Mean IG right       : 9.13e-07 ± 5.42e-07
-  IG ratio L/R        : 1.0242
+Left/Right IG ratio           : 1.0093  (1.0 = perfectly symmetric)
 
-Grad-CAM
-  Mean activation     : 0.01131 ± 0.00616
+MC Uncertainty (mean var)     : 7.44e-16 ± 5.24e-16
 
-MC Dropout Uncertainty
-  Mean uncertainty    : 4.089e-06 ± 3.657e-06
+Slice contribution — Left     : 0.0808 ± 0.0485
+Slice contribution — Right    : 0.0763 ± 0.0456
+Left/Right contribution ratio  : 1.0592
 
-Slice Contribution Analysis
-  Mean contrib left   : 0.078943 ± 0.046090
-  Mean contrib right  : 0.081083 ± 0.047897
-  Contrib ratio L/R   : 0.9736 ± 0.1165
-
-Occlusion Sensitivity (patch 8x8)
-  Mean occ left       : 0.000097 ± 0.000058
-  Mean occ right      : 0.000094 ± 0.000056
-  Occ ratio L/R       : 1.0455 ± 0.1546
+Occlusion sensitivity — Left  : 0.0003 ± 0.0002
+Occlusion sensitivity — Right : 0.0003 ± 0.0002
+Left/Right occlusion ratio     : 1.0277
