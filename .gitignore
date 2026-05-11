@@ -29,6 +29,7 @@ venv/
 # =========================
 data/raw/*
 data/processed/*
+data/brats/
 !data/raw/.gitkeep
 !data/processed/.gitkeep
 
@@ -76,6 +77,21 @@ logs/*
 # =========================
 .vscode/
 .idea/
+
+# =========================
+# LaTeX auxiliary files
+# =========================
+*.aux
+*.bbl
+*.blg
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+*.toc
+*.lof
+*.lot
+texput.log
+Documentation/*.pdf
 
 # =========================
 # Temporary / cache

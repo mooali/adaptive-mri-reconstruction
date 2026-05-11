@@ -1,0 +1,196 @@
+\documentclass{article}
+
+% ============================================================
+% Deep Learning 2026 Course Project Template
+% ============================================================
+\usepackage[final]{project_nips_style} % course style (based on NeurIPS layout)
+
+% ============================================================
+% Packages (import what you need)
+% ============================================================
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+
+\usepackage{hyperref}   % hyperlinks
+\usepackage{url}        % simple URL typesetting
+
+\usepackage{amsmath, amsfonts} % math
+\usepackage{graphicx}   % figures
+\usepackage{booktabs}   % nice tables
+\usepackage{microtype}  % typography
+\usepackage{xcolor}     % colors (use sparingly)
+
+% Optional but often useful:
+% \usepackage{siunitx}  % units and numbers
+% \usepackage{cleveref} % better cross-references (Figure -> Fig.)
+% \usepackage{listings} % code listings (if you want code blocks)
+
+% ============================================================
+% Title Information
+% ============================================================
+\title{Deep Learning 2026: Course Project Title}
+
+\author{
+  First Author \\
+  University of Bern \\
+  \texttt{first.last@unibe.ch}
+  \And
+  Second Author \\
+  University of Bern \\
+  \texttt{first.last@unibe.ch}
+  % \And
+  % Third Author \\
+  % University of Bern \\
+  % \texttt{first.last@unibe.ch}
+}
+
+\begin{document}
+\maketitle
+
+% ============================================================
+% Abstract (keep short)
+% ============================================================
+\begin{abstract}
+Briefly: (1) what problem you solve, (2) what method you built, (3) the main quantitative result.
+Keep it tight and self-contained.
+\end{abstract}
+
+\vspace{0.5em}
+
+% ============================================================
+\section{Introduction and Background}
+% ============================================================
+\textbf{What to include:}
+problem statement, why it matters, and a focused related-work summary.
+Avoid a broad survey.
+
+\paragraph{Problem statement.}
+Define the task, inputs/outputs, and evaluation.
+Example: Given input $x \in \mathbb{R}^{d}$, predict label $y \in \{1,\dots,K\}$.
+
+\paragraph{Related work.}
+Cite key papers: e.g., \citet{goodfellow2016deep} for fundamentals, \citet{he2016resnet} for residual nets.
+
+\paragraph{Contributions (recommended).}
+State 2--4 bullet points with what you actually did.
+\begin{itemize}
+  \item Implemented baseline model and strong training pipeline.
+  \item Proposed method X and ablated key components.
+  \item Evaluated on dataset Y with metric Z.
+\end{itemize}
+
+% ============================================================
+\section{Method}
+% ============================================================
+\textbf{Goal:} make it possible for someone else to reproduce what you did.
+
+\subsection{Model}
+Describe architecture and important design choices.
+
+\paragraph{Example equation: softmax classifier.}
+For logits $z = f_\theta(x)$, the predicted probability is
+\begin{equation}
+p_\theta(y=k \mid x) = \frac{\exp(z_k)}{\sum_{j=1}^K \exp(z_j)}.
+\end{equation}
+
+\paragraph{Example loss: cross-entropy.}
+\begin{equation}
+\mathcal{L}(\theta) = -\frac{1}{N}\sum_{i=1}^{N}\log p_\theta\bigl(y_i \mid x_i\bigr).
+\end{equation}
+
+\subsection{Training setup}
+Provide enough detail to replicate.
+\begin{itemize}
+  \item Dataset: name, split, preprocessing, augmentations
+  \item Optimizer + hyperparameters (LR, weight decay, batch size, epochs)
+  \item Hardware (GPU type) and training time (roughly)
+\end{itemize}
+
+\paragraph{Referencing figures/tables.}
+Use labels and references: see Figure~\ref{fig:architecture} and Table~\ref{tab:main_results}.
+
+\subsection{Implementation details}
+Mention anything that changes results materially (seeds, schedules, normalization, gradient clipping, EMA, etc.).
+If you used tricks, state them.
+
+% ============================================================
+\section{Results}
+% ============================================================
+\textbf{Goal:} numbers first, then interpretation.
+
+\subsection{Main results}
+Put your headline results in one table.
+
+\begin{table}[t]
+\centering
+\caption{Main results on \textit{DatasetName}. Report mean $\pm$ std over 3 seeds if feasible.}
+\label{tab:main_results}
+\begin{tabular}{lcc}
+\toprule
+Method & Accuracy (\%) & F1 (\%) \\
+\midrule
+Baseline & 0.0 & 0.0 \\
+Ours (full) & 0.0 & 0.0 \\
+Ours (ablated) & 0.0 & 0.0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Ablations / analysis}
+Explain *why* you think results look like they do.
+Avoid “it works well” without evidence.
+
+\begin{itemize}
+  \item What changed vs baseline?
+  \item Where does it fail? (show examples or error categories)
+  \item Sensitivity to hyperparameters?
+\end{itemize}
+
+% ============================================================
+% Figures: how to include
+% ============================================================
+\begin{figure}[t]
+  \centering
+  % Replace with your file, e.g. figures/arch.pdf or .png
+  \fbox{\rule[-.5cm]{0cm}{3.2cm} \rule[-.5cm]{5.2cm}{0cm}}
+  \caption{Example figure. Use \texttt{\textbackslash includegraphics[width=\textbackslash linewidth]\{...\}} in real reports.}
+  \label{fig:architecture}
+\end{figure}
+
+% Example real usage:
+% \begin{figure}[t]
+%   \centering
+%   \includegraphics[width=0.9\linewidth]{figures/architecture.pdf}
+%   \caption{Model architecture.}
+%   \label{fig:architecture}
+% \end{figure}
+
+% ============================================================
+\section{Conclusion}
+% ============================================================
+Summarize what you did and what you learned.
+Be explicit about limitations and what you would do next.
+
+\begin{itemize}
+  \item Key outcome (with a number)
+  \item Main limitation (honest)
+  \item Next step (specific)
+\end{itemize}
+
+% ============================================================
+% References (do not count toward page limit)
+% ============================================================
+{\small
+\bibliographystyle{plainnat}
+\bibliography{references}
+}
+
+% ============================================================
+\appendix
+% ============================================================
+\newpage
+\section{Appendix (Optional)}
+Extra details, more plots, hyperparameter tables, qualitative examples, etc.
+Not used in grading unless explicitly stated.
+
+\end{document}

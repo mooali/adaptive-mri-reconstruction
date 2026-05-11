@@ -1,0 +1,330 @@
+\documentclass[10pt,a4paper]{article}
+
+% --- Packages -------------------------------------------------------------
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[margin=1.8cm]{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{hyperref}
+\usepackage{caption}
+\usepackage{titlesec}
+\captionsetup{font=small,labelfont=bf,skip=2pt}
+
+% Tight spacing
+\setlength{\parskip}{1.5pt}
+\setlength{\parindent}{0pt}
+\titlespacing*{\section}{0pt}{4pt}{2pt}
+\titlespacing*{\subsection}{0pt}{3pt}{1pt}
+\titlespacing*{\subsubsection}{0pt}{2pt}{1pt}
+\titleformat*{\section}{\normalsize\bfseries}
+\titleformat*{\subsection}{\small\bfseries}
+
+% Compact title
+\makeatletter
+\renewcommand{\maketitle}{%
+    \begingroup
+    \begin{center}
+        {\large\bfseries \@title \par}
+        \vspace{2pt}
+        {\small Marco Cattaneo Vittone \quad Mario Gonzalez del Camino \quad Mohammed Ali \par}
+        \vspace{1pt}
+        {\footnotesize University of Bern --- April 2026 \par}
+    \end{center}
+    \vspace{-4pt}
+    \endgroup
+}
+\makeatother
+
+\title{Deep Learning for Accelerated MRI Reconstruction with Explainability Analysis}
+
+\begin{document}
+\maketitle
+
+% =========================================================================
+\section*{Abstract}
+\small
+\noindent
+This project implements and evaluates a deep learning model for accelerated
+MRI reconstruction, establishes classical baselines, validates on a structurally
+distinct second dataset, and extends the analysis with multiple explainability
+techniques. A U-Net is trained to reconstruct missing axial slices from their
+two acquired neighbours (2.5D interpolation) under $\times2$ acceleration on
+the IXI dataset, reaching \textbf{36.07\,dB PSNR} and \textbf{0.946 SSIM} ---
+\textbf{+2.86\,dB} over linear interpolation. A controlled ablation
+(PlainCNN, identical architecture without skip connections) collapses to
+33.06\,dB --- \emph{below} the linear baseline --- identifying skip
+connections as the essential ingredient. Cross-dataset evaluation on
+BraTS2020 yields a foreground MAE of $0.00754$, confirming generalisation to
+tumour-bearing, skull-stripped data. Four explainability methods consistently
+show the model uses both input slices symmetrically (Left/Right
+ratio $\approx 1.01$--$1.06$).
+\normalsize
+
+% =========================================================================
+\section{Introduction}
+Magnetic resonance imaging is slow because each axial slice is acquired
+sequentially. Long scans reduce patient comfort, raise costs, and limit
+scanner throughput. A natural acceleration strategy is to acquire only every
+$k$-th slice and reconstruct the missing ones in software. We study $k{=}2$
+(50\,\% missing) and frame reconstruction as image-to-image regression:
+predict the missing slice $\hat{y}$ from its acquired neighbours
+$(x_{\text{left}}, x_{\text{right}})$.
+This work (i) implements the full preprocessing--training--evaluation
+pipeline; (ii) establishes classical interpolation baselines; (iii) trains a
+U-Net and a controlled \textbf{PlainCNN ablation}; (iv) validates on
+BraTS2020; and (v) applies four complementary explainability methods.
+
+% =========================================================================
+\section{Datasets}
+\textbf{IXI} (primary). About 600 brain MRI scans from healthy volunteers
+acquired at three London hospitals on different scanners and field strengths.
+Only T1-weighted MPRAGE sequences are used; 581 scans are retained after
+quality filtering, producing \textbf{42\,816 input--target pairs} split
+70/15/15 into train/val/test (seed 42).
+\textbf{BraTS2020} (cross-dataset). 57\,195 pre-extracted axial HDF5 slices,
+T1 channel, skull-stripped, including tumour-bearing scans. Same 2.5D
+construction $\Rightarrow$ \textbf{28\,413 pairs}.
+
+% =========================================================================
+\section{Methodology}
+
+\subsection{Preprocessing and pair construction}
+Each volume is loaded from NIfTI, resized to $256\times256$ (bicubic with
+anti-aliasing) and intensity-normalised to $[0,1]$ via per-volume min--max
+scaling. Under $\times2$ acceleration every second slice is discarded;
+for each missing slice the model receives the two acquired neighbours as a
+two-channel input and predicts the intermediate slice.
+
+\subsection{Baselines}
+\textbf{Linear interpolation} (pixel-wise average of neighbours, weighted by
+fractional position) and \textbf{cubic spline} (fit through all acquired
+slices along depth, evaluated at missing positions). Both evaluated on the
+same test set.
+
+\subsection{Model and ablation}
+The reconstruction model is a \textbf{U-Net} with four encoder stages
+(channels $[32,64,128,256]$), 512-channel bottleneck, and a mirrored decoder
+with bilinear upsampling and concatenated skip connections at each
+resolution (\textbf{7.76\,M parameters}; Sigmoid output $\in[0,1]$).
+\textbf{PlainCNN} is identical (same depth, widths, blocks, parameter count)
+but with the skip connections \emph{removed}, isolating their architectural
+contribution.
+
+\subsection{Training}
+Hybrid loss
+$\mathcal{L} = 0.8\,\lVert \hat{y}-y\rVert_{1} + 0.2\,(1-\mathrm{SSIM}(\hat{y},y))$.
+Adam, lr $10^{-3}$, weight decay $10^{-5}$, \texttt{ReduceLROnPlateau}
+(patience 5, factor 0.5), batch size 8, up to 20 epochs (best-validation
+checkpoint kept), RTX~5070~Ti.
+
+\subsection{Metrics and explainability}
+Reported: PSNR (dB), SSIM, MAE on the held-out test split. For BraTS we add
+\textbf{FG-MAE} (MAE on foreground voxels, ground-truth $>0.02$) because
+skull-stripped volumes are $\sim$70--80\,\% zeros that trivialise raw PSNR.
+Four explainability methods are run on 50 uniformly-sampled test cases:
+(i) \textbf{Grad-CAM} on the final decoder block;
+(ii) \textbf{Integrated Gradients} (50 path steps, zero baseline);
+(iii) \textbf{slice-channel ablation} (zero one input slice, measure output
+change);
+(iv) \textbf{occlusion sensitivity} ($16{\times}16$ patch slid over each
+input). Predictive uncertainty is estimated by attaching a forward-hook
+dropout ($p{=}0.3$) to the bottleneck and running 20 stochastic passes
+(MC-Dropout).
+
+% =========================================================================
+\section{Results}
+
+\subsection{Reconstruction performance and ablation}
+The U-Net beats both classical baselines by \textbf{+2.86\,dB} PSNR and
+$+0.04$ SSIM (Table~\ref{tab:ixi}). Crucially, the PlainCNN ablation
+(33.06\,dB) is \emph{worse than linear interpolation} (33.21\,dB): a deep
+network without skip connections cannot match a four-line classical
+baseline. Skip connections account for a $\sim$3\,dB margin on their own.
+The improvement is most pronounced in mid-volume slices where tissue is
+densest and interpolation is hardest; easy boundary slices are reconstructed
+near-perfectly by all methods.
+
+\begin{table}[h]
+    \centering
+    \footnotesize
+    \begin{tabular}{lccc}
+        \toprule
+        Method                & PSNR (dB)        & SSIM              & MAE      \\
+        \midrule
+        Cubic spline          & 33.19            & 0.9048            & ---      \\
+        Linear interpolation  & 33.21            & 0.9066            & ---      \\
+        PlainCNN (no skips)   & 33.06            & ---               & ---      \\
+        \textbf{U-Net (ours)} & \textbf{36.07}   & \textbf{0.9461}   & \textbf{0.0093} \\
+        \bottomrule
+    \end{tabular}
+    \caption{IXI test-set reconstruction ($n{=}6\,422$ pairs). U-Net std:
+    $\pm6.5$\,dB PSNR, $\pm0.029$ SSIM.}
+    \label{tab:ixi}
+\end{table}
+
+\subsection{Cross-dataset generalisation}
+The same architecture, retrained on BraTS pairs, attains
+\textbf{FG-MAE 0.00754} on tissue voxels (raw PSNR 58.65\,dB but inflated by
+the dominant skull-stripped background). The model generalises to a
+structurally different dataset (tumour-bearing, skull-stripped) without
+architectural changes.
+
+\subsection{Explainability}
+Three independent input-attribution methods (IG, channel ablation,
+occlusion) yield Left/Right ratios within $\sim$6\,\% of unity
+(Table~\ref{tab:expl}), strongly confirming a genuinely \emph{bidirectional}
+interpolation. Channel ablation produces large output changes ($\sim 0.08$)
+while patch occlusion produces small changes ($\sim 3\!\times\!10^{-4}$),
+indicating reliance on \emph{global} slice structure rather than local
+features --- consistent with anatomical interpolation. Grad-CAM scales
+coherently with reconstruction difficulty: hard cases produce diffuse
+attention, medium cases focus on the skull boundary and tissue edges, easy
+cases show near-zero activation.
+
+\begin{table}[h]
+    \centering
+    \footnotesize
+    \begin{tabular}{lcc}
+        \toprule
+        Metric                                & Value                          & Interpretation \\
+        \midrule
+        IG L/R ratio                          & \textbf{1.0093}                & symmetric inputs \\
+        Slice contribution L/R ratio          & \textbf{1.059}                 & symmetric ($\sim$6\,\%) \\
+        Occlusion sensitivity L/R ratio       & \textbf{1.028}                 & no local region dominates \\
+        MC variance (20 passes)               & $7.44\!\times\!10^{-16}$       & confident on test set \\
+        \bottomrule
+    \end{tabular}
+    \caption{Explainability summary across 50 test samples. Per-method
+    means $\pm$ stds in Appendix~\ref{app:expl}.}
+    \label{tab:expl}
+\end{table}
+
+% =========================================================================
+\section{Discussion, limitations and future work}
+
+The PlainCNN ablation is the strongest finding: a deep CNN without skip
+connections is \emph{worse} than 4-tap linear interpolation. Without skips,
+all spatial information must survive a $16{\times}16$ bottleneck --- too
+coarse for $256{\times}256$ reconstruction. The $+3$\,dB the skip
+connections add is therefore the difference between \emph{useful} and
+\emph{useless}, not an incremental gain. Cross-dataset transfer to BraTS
+works without architectural changes, but PSNR alone is misleading on
+skull-stripped data; FG-MAE is the honest measure. The explainability
+findings are reassuring: a well-behaved interpolation model \emph{should}
+treat its two neighbours symmetrically, and three independent methods
+confirm ours does.
+
+\textbf{Limitations.} (i) IXI is healthy-only; the model has not seen
+tumours, lesions or hemorrhages on IXI (BraTS partially addresses this
+but does not replace a clinical study). (ii) PSNR/SSIM measure average
+quality and underweight small focal abnormalities. (iii) No radiologist
+reading study has been performed.
+
+\textbf{Future work.} \emph{Adaptive acquisition}: acquire every second
+slice, run anomaly detection, reconstruct only if no findings; otherwise
+complete the scan. \emph{Uncertainty-gated safety}: MC variance is
+near-zero on in-distribution data, so any threshold becomes meaningful only
+on out-of-distribution inputs. \emph{Pathological validation} with paired
+healthy/pathological scans and lesion annotations. \emph{DTI integration}
+correlating reconstruction errors with white-matter tract locations.
+
+% =========================================================================
+% APPENDIX (does not count toward 3-page limit)
+% =========================================================================
+\newpage
+\appendix
+\section*{\centering Appendix}
+\addcontentsline{toc}{section}{Appendix}
+
+\section{Reproducibility}
+\label{app:repro}
+All code, configuration, trained weights, and per-sample explainability
+outputs are in the project repository. Three commands reproduce the IXI
+results; a fourth and fifth reproduce the ablation and BraTS results:
+\begin{verbatim}
+python -m src.preprocess
+python -m src.train --model unet     --data ixi
+python -m src.train --model plaincnn --data ixi   # ablation
+python -m src.preprocess_brats
+python -m src.train --model unet     --data brats
+python -m src.explainability
+\end{verbatim}
+
+\section{Implementation details}
+\label{app:impl}
+\textbf{Memory.} Preprocessed arrays are stored on disk as three-phase
+NumPy memmaps (count, allocate, fill) to avoid loading the full 42\,816-pair
+($\approx$22\,GB) dataset into RAM.
+\textbf{U-Net.} Each stage uses two
+\texttt{Conv3$\times$3 $\to$ BatchNorm $\to$ ReLU} blocks; downsampling is
+\texttt{MaxPool2d(2)}; upsampling is bilinear (\texttt{F.interpolate}).
+\texttt{Sigmoid} on the last layer constrains output to $[0,1]$.
+\textbf{Loss weights.} $\alpha{=}0.8$ ($L_{1}$) was selected on a
+preliminary sweep; $\alpha\in\{0.5,0.7,0.8,0.9\}$ produced
+PSNR within $\pm0.4$\,dB of the chosen value, with $0.8$ giving the best
+SSIM/PSNR trade-off.
+\textbf{FG-MAE definition.} For BraTS we mask
+ground-truth voxels with $y > 0.02$ and report
+$\mathrm{MAE}_{\text{fg}} = \tfrac{1}{|M|}\sum_{(i,j)\in M}|\hat{y}_{ij}-y_{ij}|$.
+
+\section{Per-method explainability statistics}
+\label{app:expl}
+\begin{table}[h]
+    \centering
+    \footnotesize
+    \begin{tabular}{lcc}
+        \toprule
+        Metric                                & Mean                            & Std \\
+        \midrule
+        IG attribution -- Left slice          & $9.20\!\times\!10^{-7}$         & $5.30\!\times\!10^{-7}$ \\
+        IG attribution -- Right slice         & $9.11\!\times\!10^{-7}$         & $5.26\!\times\!10^{-7}$ \\
+        Mean Grad-CAM activation              & $0.00858$                       & $0.00581$ \\
+        Slice contribution -- Left            & $0.0808$                        & $0.0485$ \\
+        Slice contribution -- Right           & $0.0763$                        & $0.0456$ \\
+        Occlusion sensitivity -- Left         & $0.00033$                       & $0.00021$ \\
+        Occlusion sensitivity -- Right        & $0.00031$                       & $0.00020$ \\
+        MC dropout pixel variance             & $7.44\!\times\!10^{-16}$        & $5.24\!\times\!10^{-16}$ \\
+        \bottomrule
+    \end{tabular}
+    \caption{Per-method explainability statistics across 50 IXI test
+    samples (extended view of Table~\ref{tab:expl}).}
+\end{table}
+
+\section{Notes on metric inflation in skull-stripped data}
+\label{app:fgmae}
+A skull-stripped BraTS slice contains 70--80\,\% exactly-zero background.
+Both the prediction and the ground truth equal zero in those regions, so
+they contribute zero squared error. PSNR is dominated by the few non-zero
+foreground pixels but normalised by the total pixel count, producing values
+($\approx 58$\,dB) that look near-perfect. FG-MAE strips this artefact by
+restricting the average to foreground voxels.
+
+\section{References}
+\label{app:refs}
+\footnotesize
+\begin{enumerate}
+    \item Ronneberger, O., Fischer, P., \& Brox, T. (2015). U-Net:
+          Convolutional Networks for Biomedical Image Segmentation.
+          \emph{MICCAI}.
+    \item Wang, Z., Bovik, A. C., Sheikh, H. R., \& Simoncelli, E. P.
+          (2004). Image Quality Assessment: From Error Visibility to
+          Structural Similarity. \emph{IEEE TIP}.
+    \item Selvaraju, R. R., et al.\ (2017). Grad-CAM: Visual Explanations
+          from Deep Networks via Gradient-based Localization. \emph{ICCV}.
+    \item Sundararajan, M., Taly, A., \& Yan, Q. (2017). Axiomatic
+          Attribution for Deep Networks. \emph{ICML}.
+    \item Zeiler, M. D., \& Fergus, R. (2014). Visualizing and
+          Understanding Convolutional Networks. \emph{ECCV}.
+    \item Gal, Y., \& Ghahramani, Z. (2016). Dropout as a Bayesian
+          Approximation. \emph{ICML}.
+    \item IXI Dataset, Imperial College London,
+          \url{https://brain-development.org/ixi-dataset/}.
+    \item Bakas, S., et al.\ (2017--2020). BraTS Challenge.
+          \emph{Nature Scientific Data} and subsequent.
+    \item Paszke, A., et al.\ (2019). PyTorch: An Imperative Style,
+          High-Performance Deep Learning Library. \emph{NeurIPS}.
+\end{enumerate}
+
+\end{document}

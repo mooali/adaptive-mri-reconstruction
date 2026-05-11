@@ -1,0 +1,71 @@
+
+PROJECT DRAFT REPORT
+
+
+
+Deep Learning for Accelerated MRI
+Reconstruction with Explainability Analysis
+
+
+
+University of Bern
+April 2026
+
+
+
+Participants:
+Marco Cattaneo Vittone - marco.cattaneovittone@students.unibe.ch
+Mario Gonzalez del Camino - mario.gonzalezdelcamino@students.unibe.ch
+Mohammed Ali - mohammed.ali@students.unibe.ch
+
+
+
+
+1. Introduction
+This project implements and evaluates a deep learning model on a publicly available dataset, establishes classical baselines for comparison, and extends the analysis with explainability techniques to understand and communicate how the model makes its predictions.
+2. Dataset
+The IXI (Information eXtraction from Images) dataset is used throughout this project. It consists of approximately 600 brain MRI scans acquired from healthy volunteers at three hospitals in London. Scans were acquired on different scanner models and field strengths across the three sites, which introduces realistic inter-scanner variability into the dataset.
+For this project, the T1-weighted MPRAGE sequences are used exclusively, as they provide high grey/white matter contrast and are the standard structural sequence in clinical neuroimaging. After excluding scans with incomplete volumes or non-standard dimensions, 581 scans are retained for use.
+
+3. Methodology
+3.1 Preprocessing
+Each MRI volume is loaded from its NIfTI file format and subjected to a standardized preprocessing pipeline before entering the training process. All axial slices within each volume are resized to a common spatial resolution of 256×256 pixels using bicubic interpolation with anti-aliasing. Voxel intensities are then normalized to the range [0, 1] using per-volume min-max scaling, ensuring consistent contrast representation across scans acquired on different scanners. The preprocessed volumes are stored as ordered sequences of 2D axial slices.
+3.2 Simulated Acceleration and Dataset Construction
+To simulate the faster MRI acquisition scenario, slices are systematically removed from each volume at regular intervals. Under ×2 acceleration,  the primary setting evaluated in this project, every second slice is discarded, leaving alternating acquired and missing slices. 
+The reconstruction task is framed as a 2.5D problem. For each missing slice, the model receives the two immediately adjacent acquired slices as a two-channel input and produces the predicted intermediate slice as output. This process produces paired training samples of the form left neighbor, right neighbor → missing slice, from which the training dataset is constructed by sliding over all consecutive acquired slice pairs in every volume.
+3.3 Baseline Methods
+Two classical interpolation methods are implemented as baselines before introducing the deep learning model:
+Linear interpolation: the missing slice is estimated as the pixel-wise average of the two neighboring acquired slices, weighted by the fractional position of the missing slice within the gap.
+Cubic spline interpolation: a cubic spline is fitted through all acquired slices along the depth dimension independently for each pixel and evaluated at the positions of missing slices.
+Both baselines are evaluated on the same test set using PSNR and SSIM, providing a reference point against which the deep learning model is compared. 
+3.4 Model Architecture
+The reconstruction model is a U-Net. The architecture is chosen for its ability to combine local feature extraction with broader spatial context through skip connections that pass feature maps directly from the encoder to the corresponding decoder stage.
+The model takes a two-channel input, the left and right neighboring slices stacked along the channel dimension, and produces a single-channel output representing the predicted intermediate slice. The encoder progressively reduces spatial resolution while increasing feature depth through four stages with [32, 64, 128, 256] feature channels, respectively, connected by a bottleneck layer with 512 channels. The decoder mirrors this structure, using transposed convolutions for upsampling and concatenating skip connections at each stage. All convolutional blocks use batch normalization and ReLU activation, and the final output is passed through a sigmoid activation to constrain predictions to the [0, 1] intensity range.
+3.5 Training Procedure
+The model is trained using a combined loss function that jointly optimizes pixel-level accuracy and structural similarity: L = 0.8 × L₁ + 0.2 × (1 − SSIM)
+The L₁ term penalizes pixel-level intensity differences and encourages accurate mean reconstruction, while the SSIM term rewards preservation of local structural patterns, edges, and texture.
+The Adam Optimizer is used with an initial learning rate of 1×10⁻³ and a weight decay of 1×10⁻⁵. A ReduceLR OnPlateau scheduler halves the learning rate when validation loss stops improving for five consecutive epochs. Training runs for a maximum of 50 epochs with early stopping triggered after ten epochs without improvement in validation loss. The best model checkpoint, defined as the epoch with the lowest validation loss, is saved and used for all subsequent evaluations.
+3.6 Explainability Methods
+Beyond reconstruction performance, the project investigates what the model has learned and which parts of the input slices it relies upon to generate predictions. Two complementary explainability techniques are applied:
+
+Grad-CAM: Gradients are backpropagated from the mean output activation to a target convolutional layer and used to weight the layer's feature maps. The resulting heatmap highlights spatial regions of the input that most influenced the prediction. Grad-CAM is applied to the final decoder block to capture high-resolution spatial attribution.
+Integrated Gradients: Attribution scores are computed for each input pixel by integrating gradients along a linear path from a black baseline image to the actual input. This produces separate attribution maps for the left and right input slices, allowing assessment of how symmetrically the model uses its two inputs.
+4. Results
+4.1 Baseline Evaluation
+Classical interpolation baselines are evaluated across all 581 scans under ×2 acceleration. They perform nearly identically, with a PSNR of 33 dB and an SSIM of 0.9.
+4.2 U-Net Reconstruction Performance
+The trained U-Net is evaluated on the held-out test set. Results are reported alongside the baseline methods for direct comparison. The U-Net achieves a mean PSNR of 36.5 dB and SSIM of 0.95, representing improvements of +3.5 dB PSNR and +0.05 SSIM over the linear interpolation baseline. These improvements are consistent across the test set and are most pronounced in the middle of each scan volume, where brain tissue is densest, and the interpolation task is most challenging. Easy cases, predominantly background and skull-edge slices, show near-perfect reconstruction by all methods.
+4.3 Explainability Analysis
+Grad-CAM analysis reveals that the model's attention scales coherently with reconstruction difficulty. Integrated Gradients attribution maps show that the model uses both input slices in roughly equal proportion, with a left-to-right attribution ratio of approximately 0.95 across the test set. Error maps and Grad-CAM heatmaps show partial spatial alignment: regions of high model attention tend to correspond to regions of higher reconstruction error, suggesting the model is appropriately uncertain where the task is hardest. 
+5. Limitations and Clinical Considerations
+Before concluding clinical applicability, we must acknowledge several important limitations of the current work.
+Healthy subjects only: the IXI dataset contains exclusively healthy volunteer scans. The model has never been exposed to tumors, lesions, hemorrhages, or other pathological findings.
+Single evaluation metric sensitivity: PSNR and SSIM measure average image quality across the whole slice. A lesion occupying a few voxels contributes negligibly to these scores even if it is completely absent from the reconstruction.
+No clinical reader study: reconstruction quality has been evaluated only with automated image quality metrics. 
+6. Future Directions
+Adaptive acquisition: the most clinically motivated extension is a system that acquires every second slice, runs anomaly detection on the acquired data, and proceeds to reconstruct the missing slices only if no suspicious findings are detected. If something unusual is found, the full scan is completed normally. 
+Uncertainty quantification: adding Monte Carlo dropout to the U-Net would produce per-voxel uncertainty estimates alongside reconstructions. High uncertainty regions could trigger real acquisition of the corresponding slice, providing a continuous safety mechanism without requiring explicit anomaly detection.
+Pathological validation: Acquiring or accessing a dataset with paired healthy/pathological scans and lesion annotations would allow direct evaluation of reconstruction fidelity in clinically critical regions, including whether small lesions are preserved or attenuated by the model.
+DTI and tractography integration: the IXI dataset includes diffusion tensor imaging data for the same subjects. Computing fractional anisotropy maps and correlating reconstruction errors with white matter tract locations would reveal whether the model is systematically less reliable along clinically critical pathways.
+
+
