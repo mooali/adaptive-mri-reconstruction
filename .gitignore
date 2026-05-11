@@ -72,6 +72,10 @@ logs/*
 *.jpg
 *.jpeg
 
+# Keep report figures committed for README display
+!Documentation/report_metrics_summary.png
+!Documentation/report_qualitative_sample.png
+
 # =========================
 # VS Code / IDE
 # =========================
